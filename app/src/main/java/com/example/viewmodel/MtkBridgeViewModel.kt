@@ -92,6 +92,76 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
     private val _autoReboot = MutableStateFlow(true)
     val autoReboot: StateFlow<Boolean> = _autoReboot.asStateFlow()
 
+    // Persistent UI Selection States across configuration changes (Bug 4 fix)
+    private val _selectedServiceOption = MutableStateFlow(ServiceFunction.ERASE_FRP)
+    val selectedServiceOption: StateFlow<ServiceFunction> = _selectedServiceOption.asStateFlow()
+
+    private val _selectedFastbootAction = MutableStateFlow("getvar:all")
+    val selectedFastbootAction: StateFlow<String> = _selectedFastbootAction.asStateFlow()
+
+    private val _customFastbootCmd = MutableStateFlow("")
+    val customFastbootCmd: StateFlow<String> = _customFastbootCmd.asStateFlow()
+
+    private val _selectedAdbAction = MutableStateFlow("read_info")
+    val selectedAdbAction: StateFlow<String> = _selectedAdbAction.asStateFlow()
+
+    private val _customAdbCmd = MutableStateFlow("")
+    val customAdbCmd: StateFlow<String> = _customAdbCmd.asStateFlow()
+
+    // Fastboot Image Flasher States (Bug 3 fix)
+    private val _fastbootPartitionName = MutableStateFlow("boot")
+    val fastbootPartitionName: StateFlow<String> = _fastbootPartitionName.asStateFlow()
+
+    private val _fastbootSelectedFileName = MutableStateFlow("")
+    val fastbootSelectedFileName: StateFlow<String> = _fastbootSelectedFileName.asStateFlow()
+
+    private val _fastbootSelectedFileBytes = MutableStateFlow<ByteArray?>(null)
+    val fastbootSelectedFileBytes: StateFlow<ByteArray?> = _fastbootSelectedFileBytes.asStateFlow()
+
+    fun selectServiceOption(opt: ServiceFunction) {
+        _selectedServiceOption.value = opt
+    }
+
+    fun selectFastbootAction(action: String) {
+        _selectedFastbootAction.value = action
+        _customFastbootCmd.value = ""
+    }
+
+    fun setCustomFastbootCmd(cmd: String) {
+        _customFastbootCmd.value = cmd
+    }
+
+    fun selectAdbAction(action: String) {
+        _selectedAdbAction.value = action
+        _customAdbCmd.value = ""
+    }
+
+    fun setCustomAdbCmd(cmd: String) {
+        _customAdbCmd.value = cmd
+    }
+
+    fun setFastbootPartitionName(name: String) {
+        _fastbootPartitionName.value = name
+    }
+
+    fun setFastbootSelectedFile(fileName: String, data: ByteArray?) {
+        _fastbootSelectedFileName.value = fileName
+        _fastbootSelectedFileBytes.value = data
+        if (data != null) {
+            addLog(TerminalLog(now(), "Fastboot Flasher: Loaded image '$fileName' (${data.size / 1024} KB)", LogLevel.SUCCESS))
+        }
+    }
+
+    fun runFastbootFlashSelected() {
+        val part = _fastbootPartitionName.value.trim().ifEmpty { "boot" }
+        val bytes = _fastbootSelectedFileBytes.value
+        if (bytes == null || bytes.isEmpty()) {
+            addLog(TerminalLog(now(), "Fastboot Flasher Error: No image file selected! Tap 'SELECT IMAGE' first.", LogLevel.ERROR))
+            return
+        }
+        runFastbootFlashPartition(part, bytes)
+    }
+
     // MediaTek BROM Handshake & Auth Skip Method (Method 1: Burst Sync, Method 2: Stream Blaster, Method 3: Preloader Crash, Method 4: Kamakiri Payload)
     private val _selectedHandshakeMethod = MutableStateFlow(BromHandshakeMethod.METHOD_1_BURST_SYNC)
     val selectedHandshakeMethod: StateFlow<BromHandshakeMethod> = _selectedHandshakeMethod.asStateFlow()
@@ -206,7 +276,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         observeTargetPhoneState()
     }
 
-    private fun now(): String = timeFormat.format(Date())
+    fun now(): String = timeFormat.format(Date())
 
     private fun observeTargetPhoneState() {
         viewModelScope.launch {
@@ -517,6 +587,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             val chip = _scatterPlatform.value
             val parts = _partitions.value
             val opts = _flashOptions.value
+            val handshakeMethod = _selectedHandshakeMethod.value
 
             if (parts.none { it.isSelectedForFlashing }) {
                 addLog(TerminalLog(now(), "No partitions selected for flashing. Please check at least one partition in the table.", LogLevel.WARNING))
@@ -536,7 +607,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             )
 
             com.example.audio.ToolSoundManager.playOperationStart()
-            addLog(TerminalLog(now(), "Starting Batch Flash for '${_selectedBrand.value.brandName} -> ${_selectedModel.value.modelName}'...", LogLevel.INFO))
+            addLog(TerminalLog(now(), "Starting Batch Flash for '${_selectedBrand.value.brandName} -> ${_selectedModel.value.modelName}' [${handshakeMethod.shortLabel}]...", LogLevel.INFO))
             try {
                 val res = protocolEngine.withStableConnection {
                     protocolEngine.batchFlash(
@@ -548,7 +619,8 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                         flashAfterBlUnlock = opts.flashAfterBlUnlock,
                         daDlChecksum = opts.daDlChecksum,
                         autoSignFlash = opts.autoSignFlash,
-                        formatAllDownload = opts.formatAllDownload
+                        formatAllDownload = opts.formatAllDownload,
+                        handshakeMethod = handshakeMethod
                     )
                 }
                 if (res.isSuccess) {
@@ -577,10 +649,11 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         activeJob?.cancel()
         activeJob = viewModelScope.launch {
             val isSim = _isDryRun.value
-            val chip = _scatterPlatform.value
+            val chip = _scatterPlatform.value.ifBlank { _selectedModel.value.chipCode }
             val parts = _partitions.value
             val mode = _backupMode.value
             val autoReboot = _autoReboot.value
+            val handshakeMethod = _selectedHandshakeMethod.value
 
             if (_isModeIsolationEnabled.value) {
                 targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.BROM)
@@ -589,27 +662,27 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             _operationProgress.value = OperationProgress(
                 isRunning = true,
                 title = "Backup: ${mode.title}",
-                detail = "Connecting to device storage...",
+                detail = "Connecting via ${handshakeMethod.shortLabel}...",
                 percentage = 0f
             )
 
             com.example.audio.ToolSoundManager.playOperationStart()
-            addLog(TerminalLog(now(), "Initiating Backup Session: ${mode.title} for ${_selectedBrand.value.brandName} [${_selectedModel.value.modelName}]", LogLevel.INFO))
+            addLog(TerminalLog(now(), "Initiating Backup Session: ${mode.title} for ${_selectedBrand.value.brandName} [${_selectedModel.value.modelName}] [${handshakeMethod.shortLabel}]", LogLevel.INFO))
 
             try {
                 protocolEngine.withStableConnection {
                     when (mode) {
                         BackupMode.FULL_FIRMWARE -> {
-                            protocolEngine.dumpAllPartitions(parts, isSim)
+                            protocolEngine.dumpAllPartitions(parts, isSim, handshakeMethod, chip)
                         }
                         BackupMode.STABLE_FIRMWARE -> {
-                            protocolEngine.dumpStablePartitions(parts, isSim)
+                            protocolEngine.dumpStablePartitions(parts, isSim, handshakeMethod, chip)
                         }
                         BackupMode.NV_DATA -> {
-                            protocolEngine.backupNvram(chip, parts, isSim)
+                            protocolEngine.backupNvram(chip, parts, isSim, handshakeMethod)
                         }
                         BackupMode.CUSTOM_PARTITIONS -> {
-                            protocolEngine.dumpCustomPartitions(parts, isSim)
+                            protocolEngine.dumpCustomPartitions(parts, isSim, handshakeMethod, chip)
                         }
                     }
                     if (autoReboot) {
@@ -745,6 +818,21 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                                 protocolEngine.readPartition(part, isSim)
                             } else {
                                 addLog(TerminalLog(now(), "Please select a valid partition to read.", LogLevel.ERROR))
+                            }
+                        }
+                        ServiceFunction.WRITE_PARTITION -> {
+                            val part = parts.getOrNull(_selectedPartitionIndex.value)
+                            if (part != null) {
+                                var payload: ByteArray? = null
+                                if (part.boundFilePath.isNotBlank()) {
+                                    val f = java.io.File(part.boundFilePath)
+                                    if (f.exists() && f.isFile) {
+                                        payload = f.readBytes()
+                                    }
+                                }
+                                protocolEngine.writePartition(part, payload, isSim, autoNvBackup = autoNvBackup, autoReboot = autoReboot)
+                            } else {
+                                addLog(TerminalLog(now(), "Please select a valid partition to write.", LogLevel.ERROR))
                             }
                         }
                         ServiceFunction.DUMP_ALL_PARTITIONS -> {
@@ -1358,3 +1446,5 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         selectAllPartitions(selectAll)
     }
 }
+
+fun now(): String = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())

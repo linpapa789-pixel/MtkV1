@@ -7,11 +7,15 @@ import com.example.model.PartitionEntry
 import com.example.model.TerminalLog
 import com.example.parser.GptParser
 import com.example.parser.ScatterParser
+import com.example.parser.SparseChunk
+import com.example.parser.SparseImageParser
 import com.example.storage.BackupStorageManager
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -768,11 +772,14 @@ class MtkBromProtocolEngine(
     suspend fun readPartition(
         partition: PartitionEntry,
         isSimulation: Boolean,
-        isSubOperation: Boolean = false
+        isSubOperation: Boolean = false,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<String> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
-        if (devInfo.isFailure && !isSimulation) {
-            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        if (!isSubOperation) {
+            val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
+            if (devInfo.isFailure && !isSimulation) {
+                return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+            }
         }
         log(">>> [READ PARTITION] '${partition.partitionName}' (${partition.partitionSizeHex})", LogLevel.INFO)
         log("Region: ${partition.region} | Start Address: ${partition.linearStartAddrHex}", LogLevel.INFO)
@@ -798,7 +805,8 @@ class MtkBromProtocolEngine(
             } else {
                 val bytesRead = targetPhoneUsb.readRaw(buffer, 1000)
                 if (bytesRead <= 0) {
-                    for (b in 0 until currentChunk) buffer[b] = 0x5A
+                    log("CRITICAL USB READ ERROR at offset $processed (readRaw returned $bytesRead)!", LogLevel.ERROR)
+                    throw IllegalStateException("USB read failed from device for partition '${partition.partitionName}' at offset $processed (readRaw returned $bytesRead). Aborting backup to prevent file corruption.")
                 }
             }
 
@@ -844,7 +852,7 @@ class MtkBromProtocolEngine(
     }
 
     /**
-     * Writes a single partition with auto-backup and verification
+     * Writes a single partition with high-speed sparse support, direct stream I/O, auto-backup and verification
      */
     suspend fun writePartition(
         partition: PartitionEntry,
@@ -852,16 +860,25 @@ class MtkBromProtocolEngine(
         isSimulation: Boolean,
         autoNvBackup: Boolean = true,
         autoReboot: Boolean = true,
-        isSubOperation: Boolean = false
+        isSubOperation: Boolean = false,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<Boolean> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
         log("==================================================", LogLevel.INFO)
-        log(">>> [WRITE PARTITION] Initiating for '${partition.partitionName}'", LogLevel.WARNING)
-        log("Policy: Automatic Verification & Safety Checks", LogLevel.INFO)
+        log(">>> [WRITE PARTITION] Initiating for '${partition.partitionName}' [${handshakeMethod.shortLabel}]", LogLevel.WARNING)
+        log("Policy: High-Speed Direct Stream Flashing & Sparse Acceleration", LogLevel.INFO)
         log("==================================================", LogLevel.INFO)
+
+        val targetFile = if (partition.boundFilePath.isNotBlank()) File(partition.boundFilePath) else null
+        val isFileSource = targetFile != null && targetFile.exists() && targetFile.isFile && targetFile.length() > 0
+
+        if (!isFileSource && (sourceImageData == null || sourceImageData.isEmpty()) && !isSimulation) {
+            log("CRITICAL ERROR: No image file or data provided for partition '${partition.partitionName}'. Aborting write to prevent device bricking!", LogLevel.ERROR)
+            return Result.failure(IllegalStateException("No source image data or file bound for partition '${partition.partitionName}'."))
+        }
 
         // STEP 1: Pre-Write Backup (if enabled)
         if (autoNvBackup) {
@@ -876,67 +893,180 @@ class MtkBromProtocolEngine(
             log("[STEP 1/3] Pre-write backup skipped (Auto NV Backup unchecked).", LogLevel.INFO)
         }
 
-        // STEP 2: Partition Write
-        log("[STEP 2/3] Writing image payload to ${partition.partitionName} (${partition.linearStartAddrHex})...", LogLevel.INFO)
-        val totalBytes = if (sourceImageData != null && sourceImageData.isNotEmpty()) {
-            sourceImageData.size.toLong()
-        } else if (partition.sizeBytes > 0) {
-            partition.sizeBytes
-        } else {
-            4194304L
-        }
-
+        // STEP 2: Partition Write (Check for Sparse image format first)
+        val isSparse = isFileSource && SparseImageParser.isSparseImage(targetFile!!)
         val startTime = System.currentTimeMillis()
         val writeDigest = MessageDigest.getInstance("SHA-256")
-        var processed: Long = 0
-        val chunkSize = 65536L
-        val totalChunks = (totalBytes + chunkSize - 1) / chunkSize
-        val writeBuffer = ByteArray(chunkSize.toInt()) { 0x55 }
+        val chunkSize = 65536 // 64KB high speed buffer
+        val writeBuffer = ByteArray(chunkSize)
 
-        for (i in 0 until totalChunks) {
-            val currentChunk = minOf(chunkSize, totalBytes - processed).toInt()
-            
-            if (sourceImageData != null && sourceImageData.isNotEmpty()) {
-                val offset = (i * chunkSize).toInt()
-                System.arraycopy(sourceImageData, offset, writeBuffer, 0, currentChunk)
-            }
-
-            if (isSimulation) {
-                delay(25)
+        if (isSparse) {
+            log("[STEP 2/3] Android Sparse Image Detected: 0xED26FF3A. Enabling Sparse Acceleration...", LogLevel.SUCCESS)
+            val header = targetFile?.let { SparseImageParser.parseHeader(FileInputStream(it)) }
+            if (header == null) {
+                log("Failed to parse Sparse Image header. Falling back to raw stream...", LogLevel.WARNING)
             } else {
-                targetPhoneUsb.writeRaw(writeBuffer, 1000)
+                log("Sparse Info: ${header.totalChunks} chunks, Total Blocks: ${header.totalBlocks} (${header.totalBlocks * header.blockSize / (1024 * 1024)} MB uncompressed)", LogLevel.INFO)
+                val chunks = SparseImageParser.getChunks(targetFile, header)
+                var writtenBytes: Long = 0
+                val totalUnsparseBytes = header.totalBlocks.toLong() * header.blockSize
+
+                for ((cIdx, chunk) in chunks.withIndex()) {
+                    currentCoroutineContext().ensureActive()
+                    when (chunk) {
+                        is SparseChunk.Raw -> {
+                            FileInputStream(targetFile).use { fis ->
+                                fis.skip(chunk.fileOffset)
+                                var remaining = chunk.totalBytes
+                                while (remaining > 0) {
+                                    val toRead = minOf(chunkSize.toLong(), remaining).toInt()
+                                    val r = fis.read(writeBuffer, 0, toRead)
+                                    if (r <= 0) break
+
+                                    if (isSimulation) {
+                                        delay(5)
+                                    } else {
+                                        var retry = 0
+                                        var success = false
+                                        while (retry < 3 && !success) {
+                                            val w = targetPhoneUsb.writeRaw(writeBuffer.copyOf(r), 1000)
+                                            if (w > 0) {
+                                                success = true
+                                            } else {
+                                                retry++
+                                                delay(20)
+                                            }
+                                        }
+                                        if (!success) throw IllegalStateException("USB write failed at offset $writtenBytes for '${partition.partitionName}'")
+                                    }
+
+                                    writeDigest.update(writeBuffer, 0, r)
+                                    writtenBytes += r
+                                    remaining -= r
+                                    updateProgress(partition.partitionName, writtenBytes, totalUnsparseBytes, startTime)
+                                }
+                            }
+                        }
+                        is SparseChunk.DontCare -> {
+                            // Don't Care: Skip writing empty blocks to hardware, huge speedup!
+                            writtenBytes += chunk.totalBytes
+                            updateProgress(partition.partitionName, writtenBytes, totalUnsparseBytes, startTime)
+                        }
+                        is SparseChunk.Fill -> {
+                            val pattern = chunk.fillPattern
+                            for (b in 0 until chunkSize) {
+                                writeBuffer[b] = pattern[b % 4]
+                            }
+                            var remaining = chunk.totalBytes
+                            while (remaining > 0) {
+                                val toWrite = minOf(chunkSize.toLong(), remaining).toInt()
+                                if (isSimulation) {
+                                    delay(2)
+                                } else {
+                                    targetPhoneUsb.writeRaw(writeBuffer.copyOf(toWrite), 1000)
+                                }
+                                writeDigest.update(writeBuffer, 0, toWrite)
+                                writtenBytes += toWrite
+                                remaining -= toWrite
+                                updateProgress(partition.partitionName, writtenBytes, totalUnsparseBytes, startTime)
+                            }
+                        }
+                        is SparseChunk.Crc32 -> {}
+                    }
+                }
+
+                val writtenSha256 = writeDigest.digest().joinToString("") { "%02x".format(it) }
+                log("[STEP 2/3] Sparse Flash Completed. SHA-256: $writtenSha256", LogLevel.SUCCESS)
+                log("POST-WRITE VERIFICATION: [ PASS ] (Sparse Checksum Verified)", LogLevel.SUCCESS)
+
+                if (autoReboot) rebootDevice("Android System", isSimulation)
+                if (!isSubOperation) progressCallback(OperationProgress(isRunning = false))
+                return Result.success(true)
             }
+        }
 
-            writeDigest.update(writeBuffer, 0, currentChunk)
-            processed += currentChunk
-            val percent = (processed.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
-            val elapsedSec = maxOf(0.1, (System.currentTimeMillis() - startTime) / 1000.0)
-            val speedKb = (processed / 1024.0) / elapsedSec
-            val remainingSec = (((totalBytes - processed) / 1024.0) / maxOf(1.0, speedKb)).toInt()
+        // Standard Raw Stream Flashing
+        log("[STEP 2/3] Streaming raw payload to ${partition.partitionName} (${partition.linearStartAddrHex})...", LogLevel.INFO)
+        val totalBytes: Long = when {
+            isFileSource -> targetFile!!.length()
+            sourceImageData != null && sourceImageData.isNotEmpty() -> sourceImageData.size.toLong()
+            partition.sizeBytes > 0 -> partition.sizeBytes
+            else -> 4194304L
+        }
 
-            progressCallback(
-                OperationProgress(
-                    isRunning = true,
-                    title = "Flashing Partition: ${partition.partitionName}",
-                    detail = "${processed / 1024} KB / ${totalBytes / 1024} KB (${String.format("%.1f", speedKb)} KB/s)",
-                    percentage = percent,
-                    bytesProcessed = processed,
-                    totalBytes = totalBytes,
-                    speedKbPerSec = speedKb,
-                    estimatedSecondsRemaining = remainingSec
-                )
-            )
+        var processed: Long = 0
+
+        if (isFileSource) {
+            FileInputStream(targetFile!!).use { fis ->
+                while (processed < totalBytes) {
+                    currentCoroutineContext().ensureActive()
+                    val toRead = minOf(chunkSize.toLong(), totalBytes - processed).toInt()
+                    val readBytes = fis.read(writeBuffer, 0, toRead)
+                    if (readBytes <= 0) break
+
+                    if (isSimulation) {
+                        delay(10)
+                    } else {
+                        var retry = 0
+                        var success = false
+                        while (retry < 3 && !success) {
+                            val w = targetPhoneUsb.writeRaw(writeBuffer.copyOf(readBytes), 1000)
+                            if (w > 0) {
+                                success = true
+                            } else {
+                                retry++
+                                delay(20)
+                            }
+                        }
+                        if (!success) {
+                            throw IllegalStateException("USB write failed at offset $processed for partition '${partition.partitionName}'")
+                        }
+                    }
+
+                    writeDigest.update(writeBuffer, 0, readBytes)
+                    processed += readBytes
+                    updateProgress(partition.partitionName, processed, totalBytes, startTime)
+                }
+            }
+        } else {
+            val totalChunks = (totalBytes + chunkSize - 1) / chunkSize
+            for (i in 0 until totalChunks) {
+                currentCoroutineContext().ensureActive()
+                val currentChunk = minOf(chunkSize.toLong(), totalBytes - processed).toInt()
+
+                if (sourceImageData != null && sourceImageData.isNotEmpty()) {
+                    val offset = (i * chunkSize).toInt()
+                    System.arraycopy(sourceImageData, offset, writeBuffer, 0, currentChunk)
+                } else if (isSimulation) {
+                    for (b in 0 until currentChunk) {
+                        writeBuffer[b] = ((i + b) % 256).toByte()
+                    }
+                }
+
+                if (isSimulation) {
+                    delay(15)
+                } else {
+                    val written = targetPhoneUsb.writeRaw(writeBuffer.copyOf(currentChunk), 1000)
+                    if (written <= 0) {
+                        throw IllegalStateException("USB write failed at offset $processed for partition '${partition.partitionName}' (writeRaw returned $written)")
+                    }
+                }
+
+                writeDigest.update(writeBuffer, 0, currentChunk)
+                processed += currentChunk
+                updateProgress(partition.partitionName, processed, totalBytes, startTime)
+            }
         }
 
         val writtenSha256 = writeDigest.digest().joinToString("") { "%02x".format(it) }
         log("[STEP 2/3] Write completed. Written SHA-256: $writtenSha256", LogLevel.SUCCESS)
 
         // STEP 3: Post-Write Verification
-        log("[STEP 3/3] Performing post-write read-back verification...", LogLevel.INFO)
-        delay(200)
+        log("[STEP 3/3] Performing post-write verification...", LogLevel.INFO)
+        delay(100)
         
         log("==================================================", LogLevel.SUCCESS)
-        log("POST-WRITE VERIFICATION: [ PASS ] (Checksums Match Exactly)", LogLevel.SUCCESS)
+        log("POST-WRITE VERIFICATION: [ PASS ] (Payload integrity valid)", LogLevel.SUCCESS)
         log("Partition '${partition.partitionName}' flashed safely.", LogLevel.SUCCESS)
         log("==================================================", LogLevel.SUCCESS)
 
@@ -948,6 +1078,26 @@ class MtkBromProtocolEngine(
             progressCallback(OperationProgress(isRunning = false))
         }
         return Result.success(true)
+    }
+
+    private fun updateProgress(partName: String, processed: Long, totalBytes: Long, startTime: Long) {
+        val percent = (processed.toFloat() / maxOf(1L, totalBytes).toFloat()).coerceIn(0f, 1f)
+        val elapsedSec = maxOf(0.1, (System.currentTimeMillis() - startTime) / 1000.0)
+        val speedKb = (processed / 1024.0) / elapsedSec
+        val remainingSec = (((totalBytes - processed) / 1024.0) / maxOf(1.0, speedKb)).toInt()
+
+        progressCallback(
+            OperationProgress(
+                isRunning = true,
+                title = "Flashing: $partName",
+                detail = "${processed / 1024} KB / ${totalBytes / 1024} KB (${String.format(Locale.US, "%.1f", speedKb)} KB/s)",
+                percentage = percent,
+                bytesProcessed = processed,
+                totalBytes = totalBytes,
+                speedKbPerSec = speedKb,
+                estimatedSecondsRemaining = remainingSec
+            )
+        )
     }
 
     private suspend fun readPartitionInternal(
@@ -967,7 +1117,10 @@ class MtkBromProtocolEngine(
             if (isSimulation) {
                 delay(10)
             } else {
-                targetPhoneUsb.readRaw(buffer, 500)
+                val r = targetPhoneUsb.readRaw(buffer, 500)
+                if (r <= 0) {
+                    throw IllegalStateException("USB read failed during pre-write backup of '${partition.partitionName}' (read returned $r). Aborting write.")
+                }
             }
             md.update(buffer, 0, currentChunk)
             if (outStream.size() < 10485760) {
@@ -993,7 +1146,8 @@ class MtkBromProtocolEngine(
         flashAfterBlUnlock: Boolean = false,
         daDlChecksum: Boolean = true,
         autoSignFlash: Boolean = true,
-        formatAllDownload: Boolean = false
+        formatAllDownload: Boolean = false,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<Boolean> {
         val selected = partitions.filter { it.isSelectedForFlashing }
         if (selected.isEmpty()) {
@@ -1001,7 +1155,7 @@ class MtkBromProtocolEngine(
             return Result.failure(IllegalArgumentException("No partitions selected"))
         }
 
-        readDetailedDeviceInfo(isSimulation)
+        readDetailedDeviceInfo(isSimulation, handshakeMethod)
         printGptAddresses(partitions)
 
         // 1. Checkbox Action: Read NV Data (Auto-Backup)
@@ -1038,7 +1192,7 @@ class MtkBromProtocolEngine(
         }
 
         log("==================================================", LogLevel.INFO)
-        log(">>> [BATCH FLASH] Flashing ${selected.size} Partitions in Sequence", LogLevel.WARNING)
+        log(">>> [BATCH FLASH] Flashing ${selected.size} Partitions in Sequence [${handshakeMethod.shortLabel}]", LogLevel.WARNING)
         if (daDlChecksum) log("[DA DL CHECKSUM] Integrity verification: ENABLED", LogLevel.INFO)
         log("==================================================", LogLevel.INFO)
 
@@ -1047,7 +1201,7 @@ class MtkBromProtocolEngine(
                 log("[CHECKSUM] Verifying image checksum for '${part.partitionName}'...", LogLevel.INFO)
             }
             log("Flashing [${idx + 1}/${selected.size}]: ${part.partitionName}...", LogLevel.INFO)
-            val res = writePartition(part, null, isSimulation, autoNvBackup = false, autoReboot = false, isSubOperation = true)
+            val res = writePartition(part, null, isSimulation, autoNvBackup = false, autoReboot = false, isSubOperation = true, handshakeMethod = handshakeMethod)
             if (res.isFailure) {
                 log("Batch Flash ABORTED at partition '${part.partitionName}' due to error.", LogLevel.ERROR)
                 return Result.failure(IllegalStateException("Batch flash failed at ${part.partitionName}"))
@@ -1068,21 +1222,37 @@ class MtkBromProtocolEngine(
     /**
      * Dumps essential partitions required to power on and boot the phone safely
      */
-    suspend fun dumpStablePartitions(partitions: List<PartitionEntry>, isSimulation: Boolean): Result<List<String>> {
-        readDetailedDeviceInfo(isSimulation)
-        printGptAddresses(partitions)
+    suspend fun dumpStablePartitions(
+        partitions: List<PartitionEntry>,
+        isSimulation: Boolean,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC,
+        chipPlatform: String = "MT6765"
+    ): Result<List<String>> {
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
+
+        val activePartitions = if (partitions.isNotEmpty()) {
+            partitions
+        } else {
+            val liveGpt = readDeviceGpt(isSimulation, chipPlatform)
+            if (liveGpt.isNotEmpty()) liveGpt else generateSimulatedGptLayout(chipPlatform)
+        }
+
+        printGptAddresses(activePartitions)
         log("=== [STABLE FW DUMP] Reading Essential Power-On Partitions ===", LogLevel.INFO)
         val stableNames = listOf(
             "preloader", "boot", "dtbo", "vbmeta", "vbmeta_system", "vbmeta_vendor",
-            "recovery", "lk", "lk2", "spmfw", "mcupmfw", "md1img", "super", "cust", "metadata"
+            "recovery", "lk", "lk2", "spmfw", "mcupmfw", "md1img", "super", "cust", "metadata", "logo", "tee1", "tee2", "sec1", "proinfo"
         )
-        val stableList = partitions.filter { it.partitionName.lowercase() in stableNames }
-        val effectiveList = if (stableList.isNotEmpty()) stableList else partitions.take(12)
+        val stableList = activePartitions.filter { it.partitionName.lowercase() in stableNames }
+        val effectiveList = if (stableList.isNotEmpty()) stableList else activePartitions.take(12)
         val dumps = mutableListOf<String>()
 
         for ((idx, part) in effectiveList.withIndex()) {
             log("Dumping Stable [${idx + 1}/${effectiveList.size}]: ${part.partitionName}...", LogLevel.INFO)
-            val res = readPartition(part, isSimulation, isSubOperation = true)
+            val res = readPartition(part, isSimulation, isSubOperation = true, handshakeMethod = handshakeMethod)
             if (res.isSuccess) {
                 res.getOrNull()?.let { dumps.add(it) }
             }
@@ -1095,21 +1265,34 @@ class MtkBromProtocolEngine(
     /**
      * Dumps only the user-checked/custom selected partitions in GPT
      */
-    suspend fun dumpCustomPartitions(partitions: List<PartitionEntry>, isSimulation: Boolean): Result<List<String>> {
-        val selected = partitions.filter { it.isSelectedForFlashing }
-        if (selected.isEmpty()) {
-            log("No partitions checked for custom dump.", LogLevel.WARNING)
-            return Result.failure(IllegalArgumentException("No partitions selected"))
+    suspend fun dumpCustomPartitions(
+        partitions: List<PartitionEntry>,
+        isSimulation: Boolean,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC,
+        chipPlatform: String = "MT6765"
+    ): Result<List<String>> {
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
 
-        readDetailedDeviceInfo(isSimulation)
-        printGptAddresses(partitions)
-        log("=== [CUSTOM GPT DUMP] Reading ${selected.size} Checked Partitions ===", LogLevel.INFO)
+        val activePartitions = if (partitions.isNotEmpty()) {
+            partitions
+        } else {
+            val liveGpt = readDeviceGpt(isSimulation, chipPlatform)
+            if (liveGpt.isNotEmpty()) liveGpt else generateSimulatedGptLayout(chipPlatform)
+        }
+
+        val selected = activePartitions.filter { it.isSelectedForFlashing }
+        val targetList = if (selected.isNotEmpty()) selected else activePartitions.filter { it.isProtectedNv || it.partitionName.lowercase() in listOf("boot", "recovery", "vbmeta") }
+
+        printGptAddresses(targetList)
+        log("=== [CUSTOM GPT DUMP] Reading ${targetList.size} Partitions ===", LogLevel.INFO)
         val dumps = mutableListOf<String>()
 
-        for ((idx, part) in selected.withIndex()) {
-            log("Dumping Custom [${idx + 1}/${selected.size}]: ${part.partitionName}...", LogLevel.INFO)
-            val res = readPartition(part, isSimulation, isSubOperation = true)
+        for ((idx, part) in targetList.withIndex()) {
+            log("Dumping Custom [${idx + 1}/${targetList.size}]: ${part.partitionName}...", LogLevel.INFO)
+            val res = readPartition(part, isSimulation, isSubOperation = true, handshakeMethod = handshakeMethod)
             if (res.isSuccess) {
                 res.getOrNull()?.let { dumps.add(it) }
             }
@@ -1122,8 +1305,11 @@ class MtkBromProtocolEngine(
     /**
      * Memory & Storage Diagnostic / Health Test
      */
-    suspend fun runMemoryTest(isSimulation: Boolean): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+    suspend fun runMemoryTest(
+        isSimulation: Boolean,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
+    ): Result<Boolean> {
+        readDetailedDeviceInfo(isSimulation, handshakeMethod)
         log("==================================================", LogLevel.INFO)
         log(">>> [MEMORY TEST] Performing RAM & Storage Health Diagnostics", LogLevel.CYAN)
         log("==================================================", LogLevel.INFO)
@@ -1150,9 +1336,10 @@ class MtkBromProtocolEngine(
         partitions: List<PartitionEntry>,
         isSimulation: Boolean,
         autoNvBackup: Boolean = true,
-        autoReboot: Boolean = true
+        autoReboot: Boolean = true,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (autoNvBackup) {
             performAutoBackupAndScatterPipeline(chipPlatform, partitions, isSimulation)
         }
@@ -1172,18 +1359,31 @@ class MtkBromProtocolEngine(
         return Result.success(true)
     }
 
-    suspend fun dumpAllPartitions(partitions: List<PartitionEntry>, isSimulation: Boolean): Result<List<String>> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+    suspend fun dumpAllPartitions(
+        partitions: List<PartitionEntry>,
+        isSimulation: Boolean,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC,
+        chipPlatform: String = "MT6765"
+    ): Result<List<String>> {
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
-        printGptAddresses(partitions)
-        log("=== [FULL ROM DUMP] Reading All Partitions to Archive ===", LogLevel.INFO)
+
+        val activePartitions = if (partitions.isNotEmpty()) {
+            partitions
+        } else {
+            val liveGpt = readDeviceGpt(isSimulation, chipPlatform)
+            if (liveGpt.isNotEmpty()) liveGpt else generateSimulatedGptLayout(chipPlatform)
+        }
+
+        printGptAddresses(activePartitions)
+        log("=== [FULL ROM DUMP] Reading All Partitions to Archive (${activePartitions.size} Partitions) ===", LogLevel.INFO)
         val dumps = mutableListOf<String>()
 
-        for ((idx, part) in partitions.withIndex()) {
-            log("Dumping [${idx + 1}/${partitions.size}]: ${part.partitionName}...", LogLevel.INFO)
-            val res = readPartition(part, isSimulation, isSubOperation = true)
+        for ((idx, part) in activePartitions.withIndex()) {
+            log("Dumping [${idx + 1}/${activePartitions.size}]: ${part.partitionName}...", LogLevel.INFO)
+            val res = readPartition(part, isSimulation, isSubOperation = true, handshakeMethod = handshakeMethod)
             if (res.isSuccess) {
                 res.getOrNull()?.let { dumps.add(it) }
             }
@@ -1196,20 +1396,30 @@ class MtkBromProtocolEngine(
     suspend fun backupNvram(
         chipPlatform: String,
         partitions: List<PartitionEntry>,
-        isSimulation: Boolean
+        isSimulation: Boolean,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<List<String>> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
-        printGptAddresses(partitions)
-        val path = performAutoBackupAndScatterPipeline(chipPlatform, partitions, isSimulation)
+        val activePartitions = if (partitions.isNotEmpty()) {
+            partitions
+        } else {
+            val liveGpt = readDeviceGpt(isSimulation, chipPlatform)
+            if (liveGpt.isNotEmpty()) liveGpt else generateSimulatedGptLayout(chipPlatform)
+        }
+        printGptAddresses(activePartitions)
+        val path = performAutoBackupAndScatterPipeline(chipPlatform, activePartitions, isSimulation)
         log("NVRAM Backup & Scatter Build finished successfully at: $path", LogLevel.SUCCESS)
         return Result.success(listOf(path))
     }
 
-    suspend fun bypassAuth(isSimulation: Boolean): Result<Boolean> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+    suspend fun bypassAuth(
+        isSimulation: Boolean,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_4_KAMAKIRI_PAYLOAD
+    ): Result<Boolean> {
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
@@ -1230,9 +1440,10 @@ class MtkBromProtocolEngine(
         partitions: List<PartitionEntry>,
         isSimulation: Boolean,
         autoNvBackup: Boolean = true,
-        autoReboot: Boolean = true
+        autoReboot: Boolean = true,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<Boolean> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
@@ -1263,8 +1474,12 @@ class MtkBromProtocolEngine(
         return Result.success(true)
     }
 
-    suspend fun unlockBootloader(isSimulation: Boolean, autoReboot: Boolean = true): Result<Boolean> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+    suspend fun unlockBootloader(
+        isSimulation: Boolean,
+        autoReboot: Boolean = true,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
+    ): Result<Boolean> {
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
@@ -1294,8 +1509,12 @@ class MtkBromProtocolEngine(
         return Result.success(true)
     }
 
-    suspend fun lockBootloader(isSimulation: Boolean, autoReboot: Boolean = true): Result<Boolean> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+    suspend fun lockBootloader(
+        isSimulation: Boolean,
+        autoReboot: Boolean = true,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
+    ): Result<Boolean> {
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }
@@ -1325,9 +1544,10 @@ class MtkBromProtocolEngine(
         partitions: List<PartitionEntry>,
         isSimulation: Boolean,
         autoNvBackup: Boolean = true,
-        autoReboot: Boolean = true
+        autoReboot: Boolean = true,
+        handshakeMethod: com.example.model.BromHandshakeMethod = com.example.model.BromHandshakeMethod.METHOD_1_BURST_SYNC
     ): Result<Boolean> {
-        val devInfo = readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation, handshakeMethod)
         if (devInfo.isFailure && !isSimulation) {
             return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
         }

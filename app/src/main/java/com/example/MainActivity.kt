@@ -61,9 +61,22 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.MtkBridgeViewModel
 import kotlinx.coroutines.launch
 
+import androidx.activity.result.contract.ActivityResultContracts
+import com.example.model.LogLevel
+import com.example.model.TerminalLog
+import com.example.viewmodel.now
+
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MtkBridgeViewModel by viewModels()
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            viewModel.addLog(TerminalLog(now(), "System permission granted.", LogLevel.SUCCESS))
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,16 +84,24 @@ class MainActivity : ComponentActivity() {
 
         viewModel.targetPhoneUsb.permissionRequester = { device ->
             val usbManager = getSystemService(USB_SERVICE) as UsbManager
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                android.app.PendingIntent.FLAG_MUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            if (usbManager.hasPermission(device)) {
+                viewModel.targetPhoneUsb.onPermissionResult(device, true)
             } else {
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                try {
+                    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        android.app.PendingIntent.FLAG_MUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                    } else {
+                        android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                    }
+                    val intent = Intent("com.example.mtkbridge.USB_PERMISSION_ACTION").apply {
+                        setPackage(packageName)
+                    }
+                    val permissionIntent = android.app.PendingIntent.getBroadcast(this, 0, intent, flags)
+                    usbManager.requestPermission(device, permissionIntent)
+                } catch (e: Exception) {
+                    viewModel.targetPhoneUsb.onPermissionResult(device, false)
+                }
             }
-            val intent = Intent(com.example.protocol.TargetPhoneUsbManager.ACTION_USB_PHONE_PERMISSION).apply {
-                setPackage(packageName)
-            }
-            val permissionIntent = android.app.PendingIntent.getBroadcast(this, 0, intent, flags)
-            usbManager.requestPermission(device, permissionIntent)
         }
 
         handleUsbDeviceIntent(intent)

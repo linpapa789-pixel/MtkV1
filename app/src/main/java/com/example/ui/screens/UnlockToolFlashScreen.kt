@@ -144,12 +144,15 @@ fun UnlockToolFlashScreen(
     val backupLocation by viewModel.backupLocation.collectAsState()
     val selectedHandshakeMethod by viewModel.selectedHandshakeMethod.collectAsState()
 
-    // Service function selection state
-    var selectedServiceOption by remember { mutableStateOf(ServiceFunction.ERASE_FRP) }
-    var selectedFastbootAction by remember { mutableStateOf("getvar:all") }
-    var customFastbootCmd by remember { mutableStateOf("") }
-    var selectedAdbAction by remember { mutableStateOf("devices") }
-    var customAdbCmd by remember { mutableStateOf("") }
+    // Service & Fastboot function persistent selection states (Bug 4 fix)
+    val selectedServiceOption by viewModel.selectedServiceOption.collectAsState()
+    val selectedFastbootAction by viewModel.selectedFastbootAction.collectAsState()
+    val customFastbootCmd by viewModel.customFastbootCmd.collectAsState()
+    val selectedAdbAction by viewModel.selectedAdbAction.collectAsState()
+    val customAdbCmd by viewModel.customAdbCmd.collectAsState()
+    val fastbootPartitionName by viewModel.fastbootPartitionName.collectAsState()
+    val fastbootSelectedFileName by viewModel.fastbootSelectedFileName.collectAsState()
+    val fastbootSelectedFileBytes by viewModel.fastbootSelectedFileBytes.collectAsState()
 
     val context = LocalContext.current
     var showStopDialog by remember { mutableStateOf(false) }
@@ -176,6 +179,23 @@ fun UnlockToolFlashScreen(
             }
         } catch (_: Exception) {}
         return Pair(name, size)
+    }
+
+    // Fastboot image picker launcher
+    val fastbootImagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            try {
+                val (fileName, _) = resolveFileInfo(it)
+                val bytes = context.contentResolver.openInputStream(it)?.use { stream -> stream.readBytes() }
+                if (bytes != null && bytes.isNotEmpty()) {
+                    viewModel.setFastbootSelectedFile(fileName, bytes)
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Failed to read image file: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     var partitionPickingIndex by remember { mutableStateOf<Int?>(null) }
@@ -449,8 +469,27 @@ fun UnlockToolFlashScreen(
                         }
 
                         AppNavDestination.BACKUP -> {
-                            // GROUP BOX 1: BACKUP SCOPE & PARTITION SELECTION (Backup Tab Only)
-                            GroupBox(title = "1. Backup Scope & Output Storage", icon = Icons.Default.FolderOpen) {
+                            // GROUP BOX 1: TARGET BRAND & MODEL SELECTION
+                            GroupBox(title = "1. Target Phone Brand & Model", icon = Icons.Default.Memory) {
+                                BrandModelSelector(
+                                    selectedBrand = selectedBrand,
+                                    selectedModel = selectedModel,
+                                    onBrandSelect = { viewModel.selectBrand(it) },
+                                    onModelSelect = { viewModel.selectModel(it) }
+                                )
+                            }
+
+                            // GROUP BOX 2: BROM HANDSHAKE & AUTH SKIP METHOD
+                            GroupBox(title = "2. BROM Handshake & Auth Skip Method", icon = Icons.Default.Bolt) {
+                                BromHandshakeMethodSelector(
+                                    selectedMethod = selectedHandshakeMethod,
+                                    onSelectMethod = { viewModel.selectHandshakeMethod(it) },
+                                    onTestHandshake = { viewModel.testBromHandshake() }
+                                )
+                            }
+
+                            // GROUP BOX 3: BACKUP SCOPE & PARTITION SELECTION
+                            GroupBox(title = "3. Backup Scope & Output Storage", icon = Icons.Default.FolderOpen) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -600,21 +639,21 @@ fun UnlockToolFlashScreen(
                                             isSelected = selectedServiceOption == ServiceFunction.ERASE_FRP,
                                             accentColor = Color(0xFFF59E0B),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.ERASE_FRP }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.ERASE_FRP) }
 
                                         ServiceSelectCard(
                                             title = "Factory Reset (Wipe)",
                                             isSelected = selectedServiceOption == ServiceFunction.FACTORY_RESET,
                                             accentColor = Color(0xFFEF4444),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.FACTORY_RESET }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.FACTORY_RESET) }
 
                                         ServiceSelectCard(
                                             title = "Unlock Bootloader",
                                             isSelected = selectedServiceOption == ServiceFunction.UNLOCK_BOOTLOADER,
                                             accentColor = Color(0xFF10B981),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.UNLOCK_BOOTLOADER }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.UNLOCK_BOOTLOADER) }
                                     }
 
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -623,21 +662,21 @@ fun UnlockToolFlashScreen(
                                             isSelected = selectedServiceOption == ServiceFunction.LOCK_BOOTLOADER,
                                             accentColor = Color(0xFF64748B),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.LOCK_BOOTLOADER }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.LOCK_BOOTLOADER) }
 
                                         ServiceSelectCard(
                                             title = "Disable Mi Account",
                                             isSelected = selectedServiceOption == ServiceFunction.DISABLE_MI_ACCOUNT,
                                             accentColor = Color(0xFFF97316),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.DISABLE_MI_ACCOUNT }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.DISABLE_MI_ACCOUNT) }
 
                                         ServiceSelectCard(
                                             title = "Restore NVRAM",
                                             isSelected = selectedServiceOption == ServiceFunction.RESTORE_NVRAM,
                                             accentColor = Color(0xFF8B5CF6),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.RESTORE_NVRAM }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.RESTORE_NVRAM) }
                                     }
 
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -646,21 +685,21 @@ fun UnlockToolFlashScreen(
                                             isSelected = selectedServiceOption == ServiceFunction.READ_INFO,
                                             accentColor = Color(0xFF06B6D4),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.READ_INFO }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.READ_INFO) }
 
                                         ServiceSelectCard(
                                             title = "Read RPMB Keys",
                                             isSelected = selectedServiceOption == ServiceFunction.READ_RPMB,
                                             accentColor = Color(0xFF6366F1),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.READ_RPMB }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.READ_RPMB) }
 
                                         ServiceSelectCard(
                                             title = "Crash to BROM",
                                             isSelected = selectedServiceOption == ServiceFunction.CRASH_TO_BROM,
                                             accentColor = Color(0xFFEC4899),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.CRASH_TO_BROM }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.CRASH_TO_BROM) }
                                     }
 
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -669,21 +708,21 @@ fun UnlockToolFlashScreen(
                                             isSelected = selectedServiceOption == ServiceFunction.BYPASS_AUTH,
                                             accentColor = Color(0xFF14B8A6),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.BYPASS_AUTH }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.BYPASS_AUTH) }
 
                                         ServiceSelectCard(
                                             title = "Memory Health Test",
                                             isSelected = selectedServiceOption == ServiceFunction.MEMORY_TEST,
                                             accentColor = Color(0xFF3B82F6),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.MEMORY_TEST }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.MEMORY_TEST) }
 
                                         ServiceSelectCard(
                                             title = "Backup NVRAM & Scatter",
                                             isSelected = selectedServiceOption == ServiceFunction.BACKUP_NVRAM,
                                             accentColor = Color(0xFFA855F7),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.BACKUP_NVRAM }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.BACKUP_NVRAM) }
                                     }
                                 }
                             }
@@ -695,93 +734,163 @@ fun UnlockToolFlashScreen(
                                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Read Fastboot Info", "getvar:all", isSelected = (selectedFastbootAction == "getvar:all" || selectedFastbootAction == "read_info") && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "getvar:all"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("getvar:all")
                                         }
                                         FastbootOptionCard("Flashing Unlock", "flashing unlock", isSelected = selectedFastbootAction == "flashing unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "flashing unlock"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("flashing unlock")
                                         }
                                         FastbootOptionCard("OEM Unlock", "oem unlock", isSelected = selectedFastbootAction == "oem unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "oem unlock"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("oem unlock")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Lock Bootloader", "flashing lock", isSelected = selectedFastbootAction == "flashing lock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "flashing lock"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("flashing lock")
                                         }
                                         FastbootOptionCard("Erase FRP", "erase:frp", isSelected = selectedFastbootAction == "erase:frp" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "erase:frp"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("erase:frp")
                                         }
                                         FastbootOptionCard("Erase Config (FRP2)", "erase:config", isSelected = selectedFastbootAction == "erase:config" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "erase:config"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("erase:config")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Wipe Data (Reset)", "erase:userdata", isSelected = selectedFastbootAction == "erase:userdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "erase:userdata"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("erase:userdata")
                                         }
                                         FastbootOptionCard("Wipe Cache", "erase:cache", isSelected = selectedFastbootAction == "erase:cache" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "erase:cache"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("erase:cache")
                                         }
                                         FastbootOptionCard("Wipe Metadata", "erase:metadata", isSelected = selectedFastbootAction == "erase:metadata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "erase:metadata"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("erase:metadata")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Active Slot A", "set_active a", isSelected = selectedFastbootAction == "set_active a" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "set_active a"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("set_active a")
                                         }
                                         FastbootOptionCard("Active Slot B", "set_active b", isSelected = selectedFastbootAction == "set_active b" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "set_active b"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("set_active b")
                                         }
                                         FastbootOptionCard("Current Slot", "getvar:current-slot", isSelected = selectedFastbootAction == "getvar:current-slot" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "getvar:current-slot"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("getvar:current-slot")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Reboot System", "reboot", isSelected = selectedFastbootAction == "reboot" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "reboot"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("reboot")
                                         }
                                         FastbootOptionCard("Reboot Recovery", "reboot-recovery", isSelected = selectedFastbootAction == "reboot-recovery" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "reboot-recovery"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("reboot-recovery")
                                         }
                                         FastbootOptionCard("Reboot FastbootD", "reboot-fastboot", isSelected = selectedFastbootAction == "reboot-fastboot" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "reboot-fastboot"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("reboot-fastboot")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Reboot Bootloader", "reboot-bootloader", isSelected = selectedFastbootAction == "reboot-bootloader" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "reboot-bootloader"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("reboot-bootloader")
                                         }
                                         FastbootOptionCard("Reboot EDL (9008)", "oem edl", isSelected = selectedFastbootAction == "oem edl" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "oem edl"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("oem edl")
                                         }
                                         FastbootOptionCard("Erase NVRAM / Data", "erase:nvdata", isSelected = selectedFastbootAction == "erase:nvdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "erase:nvdata"
-                                            customFastbootCmd = ""
+                                            viewModel.selectFastbootAction("erase:nvdata")
                                         }
                                     }
                                 }
                             }
 
-                            // GROUP BOX 2: CUSTOM FASTBOOT COMMAND
-                            GroupBox(title = "2. Custom Fastboot Command", icon = Icons.Default.Terminal) {
+                            // GROUP BOX 2: FASTBOOT PARTITION IMAGE FLASHER (Bug 3 Fix)
+                            GroupBox(title = "2. Fastboot Image Flasher (fastboot flash <partition> <image>)", icon = Icons.Default.FlashOn) {
+                                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        // Target partition name
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = Color(0xFF090D16),
+                                            border = BorderStroke(1.dp, Color(0xFF334155)),
+                                            modifier = Modifier.width(100.dp).height(30.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp),
+                                                contentAlignment = Alignment.CenterStart
+                                            ) {
+                                                if (fastbootPartitionName.isEmpty()) {
+                                                    Text("partition", fontSize = 10.sp, color = Color(0xFF64748B), fontFamily = FontFamily.Monospace)
+                                                }
+                                                BasicTextField(
+                                                    value = fastbootPartitionName,
+                                                    onValueChange = { viewModel.setFastbootPartitionName(it) },
+                                                    textStyle = TextStyle(
+                                                        color = Color(0xFF38BDF8),
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontFamily = FontFamily.Monospace
+                                                    ),
+                                                    cursorBrush = SolidColor(Color(0xFF38BDF8)),
+                                                    singleLine = true,
+                                                    modifier = Modifier.fillMaxWidth().testTag("fastboot_partition_input")
+                                                )
+                                            }
+                                        }
+
+                                        // File selection trigger
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = if (fastbootSelectedFileName.isNotEmpty()) Color(0xFF14532D) else Color(0xFF1E293B),
+                                            border = BorderStroke(1.dp, if (fastbootSelectedFileName.isNotEmpty()) Color(0xFF22C55E) else Color(0xFF475569)),
+                                            modifier = Modifier.weight(1f).height(30.dp).clickable {
+                                                fastbootImagePickerLauncher.launch("*/*")
+                                            }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
+                                                Text(
+                                                    text = fastbootSelectedFileName.ifEmpty { "Select Image (*.img / *.bin)..." },
+                                                    fontSize = 10.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = if (fastbootSelectedFileName.isNotEmpty()) Color.White else Color(0xFF94A3B8),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                            }
+                                        }
+
+                                        // Flash Button
+                                        Button(
+                                            onClick = { viewModel.runFastbootFlashSelected() },
+                                            enabled = !progress.isRunning && fastbootSelectedFileBytes != null,
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = Color(0xFF0284C7),
+                                                disabledContainerColor = Color(0xFF334155)
+                                            ),
+                                            shape = RoundedCornerShape(4.dp),
+                                            modifier = Modifier.height(30.dp).testTag("fastboot_flash_btn")
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Icon(Icons.Default.FlashOn, contentDescription = null, modifier = Modifier.size(12.dp), tint = Color.White)
+                                                Text("FLASH", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // GROUP BOX 3: CUSTOM FASTBOOT COMMAND
+                            GroupBox(title = "3. Custom Fastboot Command", icon = Icons.Default.Terminal) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -809,7 +918,7 @@ fun UnlockToolFlashScreen(
                                             }
                                             BasicTextField(
                                                 value = customFastbootCmd,
-                                                onValueChange = { customFastbootCmd = it },
+                                                onValueChange = { viewModel.setCustomFastbootCmd(it) },
                                                 textStyle = TextStyle(
                                                     color = Color(0xFFF1F5F9),
                                                     fontSize = 10.sp,
@@ -817,7 +926,7 @@ fun UnlockToolFlashScreen(
                                                 ),
                                                 cursorBrush = SolidColor(Color(0xFF38BDF8)),
                                                 singleLine = true,
-                                                modifier = Modifier.fillMaxWidth()
+                                                modifier = Modifier.fillMaxWidth().testTag("custom_fastboot_input")
                                             )
                                         }
                                     }
@@ -831,58 +940,46 @@ fun UnlockToolFlashScreen(
                                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Read Full Info", "read_info", isSelected = (selectedAdbAction == "read_info" || selectedAdbAction.startsWith("getprop")) && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "read_info"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("read_info")
                                         }
                                         FastbootOptionCard("Bypass FRP (Setup)", "settings put global setup_wizard_has_run 1 && settings put secure user_setup_complete 1 && settings put global device_provisioned 1 && am start -c android.intent.category.HOME -a android.intent.action.MAIN", isSelected = selectedAdbAction.contains("setup_wizard_has_run") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "settings put global setup_wizard_has_run 1 && settings put secure user_setup_complete 1 && settings put global device_provisioned 1 && am start -c android.intent.category.HOME -a android.intent.action.MAIN"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("settings put global setup_wizard_has_run 1 && settings put secure user_setup_complete 1 && settings put global device_provisioned 1 && am start -c android.intent.category.HOME -a android.intent.action.MAIN")
                                         }
                                         FastbootOptionCard("MoreLocale Perm", "pm grant jp.co.c_lis.ccl.morelocale android.permission.CHANGE_CONFIGURATION", isSelected = selectedAdbAction.contains("morelocale") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "pm grant jp.co.c_lis.ccl.morelocale android.permission.CHANGE_CONFIGURATION"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("pm grant jp.co.c_lis.ccl.morelocale android.permission.CHANGE_CONFIGURATION")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Reboot Bootloader", "reboot bootloader", isSelected = selectedAdbAction == "reboot bootloader" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "reboot bootloader"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("reboot bootloader")
                                         }
                                         FastbootOptionCard("Reboot Recovery", "reboot recovery", isSelected = selectedAdbAction == "reboot recovery" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "reboot recovery"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("reboot recovery")
                                         }
                                         FastbootOptionCard("Reboot EDL (9008)", "reboot edl", isSelected = selectedAdbAction == "reboot edl" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "reboot edl"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("reboot edl")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Disable Mi Cloud", "pm disable-user --user 0 com.miui.cloudservice", isSelected = selectedAdbAction.contains("com.miui.cloudservice") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "pm disable-user --user 0 com.miui.cloudservice && pm disable-user --user 0 com.xiaomi.finddevice"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("pm disable-user --user 0 com.miui.cloudservice && pm disable-user --user 0 com.xiaomi.finddevice")
                                         }
                                         FastbootOptionCard("Battery Health", "dumpsys battery", isSelected = selectedAdbAction == "dumpsys battery" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "dumpsys battery"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("dumpsys battery")
                                         }
                                         FastbootOptionCard("Screen Size & DPI", "wm size && wm density", isSelected = selectedAdbAction == "wm size && wm density" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "wm size && wm density"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("wm size && wm density")
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Remove Demo Mode", "am broadcast -a com.google.android.setupwizard.DEMO_MODE_EXIT", isSelected = selectedAdbAction.contains("DEMO_MODE_EXIT") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "am broadcast -a com.google.android.setupwizard.DEMO_MODE_EXIT"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("am broadcast -a com.google.android.setupwizard.DEMO_MODE_EXIT")
                                         }
                                         FastbootOptionCard("Dump Partitions", "cat /proc/partitions", isSelected = selectedAdbAction == "cat /proc/partitions" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "cat /proc/partitions"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("cat /proc/partitions")
                                         }
                                         FastbootOptionCard("Reboot System", "reboot", isSelected = selectedAdbAction == "reboot" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "reboot"
-                                            customAdbCmd = ""
+                                            viewModel.selectAdbAction("reboot")
                                         }
                                     }
                                 }
@@ -917,7 +1014,7 @@ fun UnlockToolFlashScreen(
                                             }
                                             BasicTextField(
                                                 value = customAdbCmd,
-                                                onValueChange = { customAdbCmd = it },
+                                                onValueChange = { viewModel.setCustomAdbCmd(it) },
                                                 textStyle = TextStyle(
                                                     color = Color(0xFFF1F5F9),
                                                     fontSize = 10.sp,
@@ -925,7 +1022,7 @@ fun UnlockToolFlashScreen(
                                                 ),
                                                 cursorBrush = SolidColor(Color(0xFF38BDF8)),
                                                 singleLine = true,
-                                                modifier = Modifier.fillMaxWidth()
+                                                modifier = Modifier.fillMaxWidth().testTag("custom_adb_input")
                                             )
                                         }
                                     }
@@ -943,14 +1040,14 @@ fun UnlockToolFlashScreen(
                                             isSelected = selectedServiceOption == ServiceFunction.MEMORY_TEST,
                                             accentColor = Color(0xFF06B6D4),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.MEMORY_TEST }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.MEMORY_TEST) }
 
                                         ServiceSelectCard(
                                             title = "SLA / DAA Auth Bypass",
                                             isSelected = selectedServiceOption == ServiceFunction.BYPASS_AUTH,
                                             accentColor = Color(0xFFF43F5E),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.BYPASS_AUTH }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.BYPASS_AUTH) }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         ServiceSelectCard(
@@ -958,14 +1055,14 @@ fun UnlockToolFlashScreen(
                                             isSelected = selectedServiceOption == ServiceFunction.CRASH_TO_BROM,
                                             accentColor = Color(0xFF3B82F6),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.CRASH_TO_BROM }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.CRASH_TO_BROM) }
 
                                         ServiceSelectCard(
                                             title = "Reboot to System OS",
                                             isSelected = selectedServiceOption == ServiceFunction.REBOOT_SYSTEM,
                                             accentColor = Color(0xFF10B981),
                                             modifier = Modifier.weight(1f)
-                                        ) { selectedServiceOption = ServiceFunction.REBOOT_SYSTEM }
+                                        ) { viewModel.selectServiceOption(ServiceFunction.REBOOT_SYSTEM) }
                                     }
                                 }
                             }
