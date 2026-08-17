@@ -96,10 +96,14 @@ class TargetPhoneUsbManager(
     }
 
     val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-    private var usbConnection: UsbDeviceConnection? = null
-    private var usbInterface: UsbInterface? = null
-    private var inEndpoint: UsbEndpoint? = null
-    private var outEndpoint: UsbEndpoint? = null
+    var usbConnection: UsbDeviceConnection? = null
+        private set
+    var usbInterface: UsbInterface? = null
+        private set
+    var inEndpoint: UsbEndpoint? = null
+        private set
+    var outEndpoint: UsbEndpoint? = null
+        private set
     var currentDevice: UsbDevice? = null
         private set
     private val scope = CoroutineScope(Dispatchers.IO)

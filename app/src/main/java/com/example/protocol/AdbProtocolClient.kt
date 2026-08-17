@@ -18,14 +18,14 @@ import java.security.interfaces.RSAPrivateKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
+import java.util.Arrays
 import javax.crypto.Cipher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Native Android ADB Protocol Client implementing USB raw transfer framing with RSA Key Authentication.
- * Adb Packet Format:
- * [Command (4B)][Arg0 (4B)][Arg1 (4B)][DataLength (4B)][DataChecksum (4B)][Magic (4B)]
+ * Standard Android ADB Protocol Implementation with full A_AUTH RSA handshake support.
+ * Format: [Command (4B)][Arg0 (4B)][Arg1 (4B)][DataLength (4B)][DataChecksum (4B)][Magic (4B)]
  */
 class AdbProtocolClient(
     private val usbManager: UsbManager,
@@ -80,15 +80,39 @@ class AdbProtocolClient(
         }
 
         fun signToken(token: ByteArray, privateKey: RSAPrivateKey): ByteArray {
-            val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
-            cipher.init(Cipher.ENCRYPT_MODE, privateKey)
-            return cipher.doFinal(token)
+            // Android adbd verifies signature using RSA_verify with NID_sha1 or raw PKCS1 padding on token
+            val cipher = Cipher.getInstance("RSA/ECB/NoPadding")
+            
+            // Standard PKCS#1 v1.5 padding block for 2048 bit (256 bytes)
+            val block = ByteArray(256)
+            block[0] = 0x00
+            block[1] = 0x01
+            
+            // ASN.1 prefix for SHA-1 digest info if token is 20 bytes (SHA-1)
+            val sha1Prefix = byteArrayOf(
+                0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E, 0x03, 0x02, 0x1A, 0x05, 0x00, 0x04, 0x14
+            )
+            
+            val padLen: Int
+            if (token.size == 20) {
+                padLen = 256 - 3 - sha1Prefix.size - token.size
+                Arrays.fill(block, 2, 2 + padLen, 0xFF.toByte())
+                block[2 + padLen] = 0x00
+                System.arraycopy(sha1Prefix, 0, block, 2 + padLen + 1, sha1Prefix.size)
+                System.arraycopy(token, 0, block, 2 + padLen + 1 + sha1Prefix.size, token.size)
+            } else {
+                padLen = 256 - 3 - token.size
+                Arrays.fill(block, 2, 2 + padLen, 0xFF.toByte())
+                block[2 + padLen] = 0x00
+                System.arraycopy(token, 0, block, 2 + padLen + 1, token.size)
+            }
+
+            cipher.init(Cipher.DECRYPT_MODE, privateKey)
+            return cipher.doFinal(block)
         }
 
         fun getAdbPublicKeyPayload(publicKey: RSAPublicKey): ByteArray {
             val n = publicKey.modulus
-            val e = publicKey.publicExponent
-
             val r = BigInteger.ONE.shiftLeft(2048)
             val rr = r.multiply(r).mod(n)
 
@@ -97,20 +121,20 @@ class AdbProtocolClient(
             val n0inv = base32.subtract(n0.modInverse(base32)).remainder(base32).toInt()
 
             val buffer = ByteBuffer.allocate(524).order(ByteOrder.LITTLE_ENDIAN)
-            buffer.putInt(64) // len (2048 / 32)
+            buffer.putInt(64) // 2048 / 32 = 64 32-bit words
             buffer.putInt(n0inv)
 
             for (i in 0 until 64) {
-                val word = n.shiftRight(i * 32).remainder(base32).toInt()
+                val word = n.shiftRight(i * 32).remainder(base32).toLong().toInt()
                 buffer.putInt(word)
             }
 
             for (i in 0 until 64) {
-                val word = rr.shiftRight(i * 32).remainder(base32).toInt()
+                val word = rr.shiftRight(i * 32).remainder(base32).toLong().toInt()
                 buffer.putInt(word)
             }
 
-            buffer.putInt(e.toInt())
+            buffer.putInt(publicKey.publicExponent.toInt())
 
             val b64 = Base64.encodeToString(buffer.array(), Base64.NO_WRAP)
             val adbKeyString = "$b64 MTKUnlockTool@Android\u0000"
@@ -122,12 +146,13 @@ class AdbProtocolClient(
     private var adbInterface: UsbInterface? = null
     private var inEndpoint: UsbEndpoint? = null
     private var outEndpoint: UsbEndpoint? = null
-
     private var localIdCounter = 1
 
     suspend fun open(): Boolean = withContext(Dispatchers.IO) {
         try {
             val conn = usbManager.openDevice(device) ?: return@withContext false
+            
+            // Priority 1: Match standard ADB Interface class (0xFF, 0x42, 0x01)
             for (i in 0 until device.interfaceCount) {
                 val iface = device.getInterface(i)
                 if (iface.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC &&
@@ -153,6 +178,29 @@ class AdbProtocolClient(
                     }
                 }
             }
+
+            // Priority 2: Generic Bulk Interface fallback (e.g. customized ADB descriptors)
+            for (i in 0 until device.interfaceCount) {
+                val iface = device.getInterface(i)
+                var inEp: UsbEndpoint? = null
+                var outEp: UsbEndpoint? = null
+                for (j in 0 until iface.endpointCount) {
+                    val ep = iface.getEndpoint(j)
+                    if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                        if (ep.direction == UsbConstants.USB_DIR_IN) inEp = ep
+                        else outEp = ep
+                    }
+                }
+                if (inEp != null && outEp != null) {
+                    conn.claimInterface(iface, true)
+                    connection = conn
+                    adbInterface = iface
+                    inEndpoint = inEp
+                    outEndpoint = outEp
+                    return@withContext true
+                }
+            }
+
             conn.close()
             return@withContext false
         } catch (_: Exception) {
@@ -190,22 +238,22 @@ class AdbProtocolClient(
         header.putInt(magic)
 
         val headerBytes = header.array()
-        val hWritten = conn.bulkTransfer(outEp, headerBytes, headerBytes.size, 2000)
+        val hWritten = conn.bulkTransfer(outEp, headerBytes, headerBytes.size, 2500)
         if (hWritten != 24) return false
 
         if (data != null && data.isNotEmpty()) {
-            val dWritten = conn.bulkTransfer(outEp, data, data.size, 3000)
+            val dWritten = conn.bulkTransfer(outEp, data, data.size, 3500)
             if (dWritten != data.size) return false
         }
         return true
     }
 
-    private fun readPacket(): Pair<IntArray, ByteArray?>? {
+    private fun readPacket(timeout: Int = 3000): Pair<IntArray, ByteArray?>? {
         val conn = connection ?: return null
         val inEp = inEndpoint ?: return null
 
         val headerBuf = ByteArray(24)
-        val hRead = conn.bulkTransfer(inEp, headerBuf, 24, 3000)
+        val hRead = conn.bulkTransfer(inEp, headerBuf, 24, timeout)
         if (hRead != 24) return null
 
         val bb = ByteBuffer.wrap(headerBuf).order(ByteOrder.LITTLE_ENDIAN)
@@ -225,7 +273,7 @@ class AdbProtocolClient(
             while (totalRead < dataLen) {
                 val chunkSize = (dataLen - totalRead).coerceAtMost(MAX_PAYLOAD)
                 val tempBuf = ByteArray(chunkSize)
-                val read = conn.bulkTransfer(inEp, tempBuf, chunkSize, 3000)
+                val read = conn.bulkTransfer(inEp, tempBuf, chunkSize, timeout)
                 if (read <= 0) break
                 System.arraycopy(tempBuf, 0, data, totalRead, read)
                 totalRead += read
@@ -239,7 +287,7 @@ class AdbProtocolClient(
         if (!sendPacket(A_CNXN, ADB_VERSION, MAX_PAYLOAD, banner)) {
             return@withContext false
         }
-        var response = readPacket() ?: return@withContext false
+        var response = readPacket(3000) ?: return@withContext false
         var cmd = response.first[0]
 
         if (cmd == A_CNXN) {
@@ -252,11 +300,11 @@ class AdbProtocolClient(
             val privKey = keyPair.private as RSAPrivateKey
             val pubKey = keyPair.public as RSAPublicKey
 
-            // 1. Try to sign with private key
+            // 1. Try to sign with private key in case device was previously authorized
             try {
                 val signature = signToken(token, privKey)
                 if (sendPacket(A_AUTH, ADB_AUTH_SIGNATURE, 0, signature)) {
-                    val authResp = readPacket()
+                    val authResp = readPacket(1500)
                     if (authResp != null && authResp.first[0] == A_CNXN) {
                         return@withContext true
                     }
@@ -271,12 +319,21 @@ class AdbProtocolClient(
 
             onAuthPrompt?.invoke()
 
-            // 3. Wait up to 10 seconds for user to tap "Allow" on target phone screen
+            // 3. Poll and wait up to 15 seconds for user to tap "Allow" on target phone screen
             val startTime = System.currentTimeMillis()
-            while (System.currentTimeMillis() - startTime < 10000L) {
-                val authWait = readPacket() ?: break
-                if (authWait.first[0] == A_CNXN) {
-                    return@withContext true
+            while (System.currentTimeMillis() - startTime < 15000L) {
+                val authWait = readPacket(2000)
+                if (authWait != null) {
+                    if (authWait.first[0] == A_CNXN) {
+                        return@withContext true
+                    }
+                    if (authWait.first[0] == A_AUTH && authWait.second != null) {
+                        // Resend signature if challenged again
+                        try {
+                            val sig = signToken(authWait.second!!, privKey)
+                            sendPacket(A_AUTH, ADB_AUTH_SIGNATURE, 0, sig)
+                        } catch (_: Exception) {}
+                    }
                 }
             }
         }
@@ -284,9 +341,6 @@ class AdbProtocolClient(
         return@withContext false
     }
 
-    /**
-     * Executes an ADB Shell command (e.g. getprop, reboot, pm) and streams or returns the result.
-     */
     suspend fun executeShell(command: String): String = withContext(Dispatchers.IO) {
         val localId = localIdCounter++
         val dest = "shell:$command\u0000".toByteArray(Charsets.UTF_8)
@@ -298,8 +352,8 @@ class AdbProtocolClient(
         val sb = StringBuilder()
 
         val startTime = System.currentTimeMillis()
-        while (System.currentTimeMillis() - startTime < 10000L) {
-            val packet = readPacket() ?: break
+        while (System.currentTimeMillis() - startTime < 12000L) {
+            val packet = readPacket(2500) ?: break
             val cmd = packet.first[0]
             val arg0 = packet.first[1]
             val arg1 = packet.first[2]
@@ -324,4 +378,3 @@ class AdbProtocolClient(
         return@withContext sb.toString().trim()
     }
 }
-

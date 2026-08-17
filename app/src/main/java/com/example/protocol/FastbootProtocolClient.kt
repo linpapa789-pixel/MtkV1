@@ -16,18 +16,31 @@ import kotlinx.coroutines.withContext
  */
 class FastbootProtocolClient(
     private val usbManager: UsbManager,
-    private val device: UsbDevice
+    private val device: UsbDevice?,
+    private val existingConnection: UsbDeviceConnection? = null,
+    private val existingInEndpoint: UsbEndpoint? = null,
+    private val existingOutEndpoint: UsbEndpoint? = null
 ) {
-    private var connection: UsbDeviceConnection? = null
+    private var connection: UsbDeviceConnection? = existingConnection
     private var fastbootInterface: UsbInterface? = null
-    private var inEndpoint: UsbEndpoint? = null
-    private var outEndpoint: UsbEndpoint? = null
+    private var inEndpoint: UsbEndpoint? = existingInEndpoint
+    private var outEndpoint: UsbEndpoint? = existingOutEndpoint
+    private var ownsConnection: Boolean = (existingConnection == null)
 
     suspend fun open(): Boolean = withContext(Dispatchers.IO) {
+        if (connection != null && inEndpoint != null && outEndpoint != null) {
+            return@withContext true
+        }
+
+        val dev = device ?: return@withContext false
+
         try {
-            val conn = usbManager.openDevice(device) ?: return@withContext false
-            for (i in 0 until device.interfaceCount) {
-                val iface = device.getInterface(i)
+            val conn = usbManager.openDevice(dev) ?: return@withContext false
+            ownsConnection = true
+
+            // Priority 1: Check standard Fastboot interface descriptor (0xFF, 0x42, 0x03)
+            for (i in 0 until dev.interfaceCount) {
+                val iface = dev.getInterface(i)
                 if (iface.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC &&
                     iface.interfaceSubclass == 0x42 &&
                     iface.interfaceProtocol == 0x03
@@ -51,6 +64,29 @@ class FastbootProtocolClient(
                     }
                 }
             }
+
+            // Priority 2: Fallback for devices with generic bulk endpoints in Fastboot mode
+            for (i in 0 until dev.interfaceCount) {
+                val iface = dev.getInterface(i)
+                var inEp: UsbEndpoint? = null
+                var outEp: UsbEndpoint? = null
+                for (j in 0 until iface.endpointCount) {
+                    val ep = iface.getEndpoint(j)
+                    if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                        if (ep.direction == UsbConstants.USB_DIR_IN) inEp = ep
+                        else outEp = ep
+                    }
+                }
+                if (inEp != null && outEp != null) {
+                    conn.claimInterface(iface, true)
+                    connection = conn
+                    fastbootInterface = iface
+                    inEndpoint = inEp
+                    outEndpoint = outEp
+                    return@withContext true
+                }
+            }
+
             conn.close()
             return@withContext false
         } catch (_: Exception) {
@@ -59,11 +95,13 @@ class FastbootProtocolClient(
     }
 
     fun close() {
-        try {
-            fastbootInterface?.let { connection?.releaseInterface(it) }
-            connection?.close()
-        } catch (_: Exception) {}
-        connection = null
+        if (ownsConnection) {
+            try {
+                fastbootInterface?.let { connection?.releaseInterface(it) }
+                connection?.close()
+            } catch (_: Exception) {}
+            connection = null
+        }
     }
 
     /**
@@ -81,7 +119,7 @@ class FastbootProtocolClient(
         }
 
         val infoMessages = mutableListOf<String>()
-        val rxBuf = ByteArray(512)
+        val rxBuf = ByteArray(1024)
 
         val startTime = System.currentTimeMillis()
         while (System.currentTimeMillis() - startTime < 10000L) {
@@ -104,6 +142,16 @@ class FastbootProtocolClient(
                 }
                 "DATA" -> {
                     return@withContext FastbootResult(true, "DATA_READY:$payload", "")
+                }
+                else -> {
+                    // Sometimes fastboot output comes with newlines or mixed packets
+                    if (response.contains("OKAY")) {
+                        return@withContext FastbootResult(true, infoMessages.joinToString("\n") + "\n" + response.trim(), "")
+                    } else if (response.contains("FAIL")) {
+                        return@withContext FastbootResult(false, infoMessages.joinToString("\n"), response.trim())
+                    } else {
+                        infoMessages.add(response.trim())
+                    }
                 }
             }
         }

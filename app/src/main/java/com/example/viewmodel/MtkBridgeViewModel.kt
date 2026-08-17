@@ -819,22 +819,47 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             _isFastbootBusy.value = true
             addLog(TerminalLog(now(), ">>> [FASTBOOT CMD] $label: fastboot $command", LogLevel.INFO))
-            val dev = targetPhoneUsb.currentDevice
+
+            var dev = targetPhoneUsb.currentDevice
             if (dev == null && !_isDryRun.value) {
-                addLog(TerminalLog(now(), "[-] Fastboot Error: No USB Device connected in Fastboot mode.", LogLevel.ERROR))
+                // Try scanning and connecting if not connected yet
+                targetPhoneUsb.scanAndConnect()
+                dev = targetPhoneUsb.currentDevice
+            }
+
+            if (dev == null && !_isDryRun.value) {
+                val attachedDevices = targetPhoneUsb.usbManager.deviceList
+                if (attachedDevices.isNotEmpty()) {
+                    val candidate = attachedDevices.values.firstOrNull()
+                    if (candidate != null) {
+                        if (!targetPhoneUsb.usbManager.hasPermission(candidate)) {
+                            targetPhoneUsb.requestDevicePermission(candidate)
+                            addLog(TerminalLog(now(), "[*] Fastboot: Requesting OTG USB permission for ${candidate.productName ?: "device"}...", LogLevel.WARNING))
+                            _isFastbootBusy.value = false
+                            return@launch
+                        } else {
+                            targetPhoneUsb.connectDevice(candidate)
+                            dev = targetPhoneUsb.currentDevice
+                        }
+                    }
+                }
+            }
+
+            if (dev == null && !_isDryRun.value) {
+                addLog(TerminalLog(now(), "[-] Fastboot Error: No USB Device detected. Please connect phone via USB OTG cable in Fastboot mode.", LogLevel.ERROR))
                 _isFastbootBusy.value = false
                 return@launch
             }
 
-            if (_isDryRun.value || dev == null) {
+            if (_isDryRun.value && dev == null) {
                 kotlinx.coroutines.delay(600)
                 val mockResult = when {
                     command.contains("getvar:all") || command.contains("getvar all") -> 
                         "product: ruby_pro\nversion-bootloader: MT6877_V1.0\nsecure: yes\nunlocked: no\noff-mode-charge: 1\ncharger-screen-enabled: 1\nbattery-voltage: 4120mV"
                     command.contains("unlock") -> "OKAY [ 0.054s ]\nUnlocked bootloader successfully."
                     command.contains("lock") -> "OKAY [ 0.048s ]\nLocked bootloader successfully."
-                    command.contains("erase frp") -> "Erasing 'frp' ... OKAY [ 0.012s ]\nFinished."
-                    command.contains("erase userdata") -> "Erasing 'userdata' ... OKAY [ 0.231s ]\nFinished."
+                    command.contains("erase frp") || command.contains("erase:frp") -> "Erasing 'frp' ... OKAY [ 0.012s ]\nFinished."
+                    command.contains("erase userdata") || command.contains("erase:userdata") -> "Erasing 'userdata' ... OKAY [ 0.231s ]\nFinished."
                     command.contains("reboot") -> "Rebooting device ... OKAY"
                     else -> "OKAY [ 0.020s ]"
                 }
@@ -844,7 +869,13 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 return@launch
             }
 
-            val client = com.example.protocol.FastbootProtocolClient(targetPhoneUsb.usbManager, dev)
+            val client = com.example.protocol.FastbootProtocolClient(
+                usbManager = targetPhoneUsb.usbManager,
+                device = dev,
+                existingConnection = targetPhoneUsb.usbConnection,
+                existingInEndpoint = targetPhoneUsb.inEndpoint,
+                existingOutEndpoint = targetPhoneUsb.outEndpoint
+            )
             val opened = client.open()
             if (!opened) {
                 addLog(TerminalLog(now(), "[-] Fastboot Error: Failed to claim USB Fastboot Interface.", LogLevel.ERROR))
