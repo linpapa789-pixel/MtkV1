@@ -29,7 +29,10 @@ import kotlinx.coroutines.withContext
  */
 class AdbProtocolClient(
     private val usbManager: UsbManager,
-    private val device: UsbDevice
+    private val device: UsbDevice?,
+    private val existingConnection: UsbDeviceConnection? = null,
+    private val existingInEndpoint: UsbEndpoint? = null,
+    private val existingOutEndpoint: UsbEndpoint? = null
 ) {
     companion object {
         const val A_SYNC = 0x434e5953
@@ -80,15 +83,11 @@ class AdbProtocolClient(
         }
 
         fun signToken(token: ByteArray, privateKey: RSAPrivateKey): ByteArray {
-            // Android adbd verifies signature using RSA_verify with NID_sha1 or raw PKCS1 padding on token
             val cipher = Cipher.getInstance("RSA/ECB/NoPadding")
-            
-            // Standard PKCS#1 v1.5 padding block for 2048 bit (256 bytes)
             val block = ByteArray(256)
             block[0] = 0x00
             block[1] = 0x01
             
-            // ASN.1 prefix for SHA-1 digest info if token is 20 bytes (SHA-1)
             val sha1Prefix = byteArrayOf(
                 0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E, 0x03, 0x02, 0x1A, 0x05, 0x00, 0x04, 0x14
             )
@@ -142,19 +141,29 @@ class AdbProtocolClient(
         }
     }
 
-    private var connection: UsbDeviceConnection? = null
+    private var connection: UsbDeviceConnection? = existingConnection
     private var adbInterface: UsbInterface? = null
-    private var inEndpoint: UsbEndpoint? = null
-    private var outEndpoint: UsbEndpoint? = null
+    private var inEndpoint: UsbEndpoint? = existingInEndpoint
+    private var outEndpoint: UsbEndpoint? = existingOutEndpoint
+    private var ownsConnection: Boolean = (existingConnection == null)
     private var localIdCounter = 1
 
+    var isConnected: Boolean = false
+        private set
+
+    fun isOpen(): Boolean = (connection != null && inEndpoint != null && outEndpoint != null)
+
     suspend fun open(): Boolean = withContext(Dispatchers.IO) {
+        if (isOpen()) return@withContext true
+        val dev = device ?: return@withContext false
+
         try {
-            val conn = usbManager.openDevice(device) ?: return@withContext false
+            val conn = usbManager.openDevice(dev) ?: return@withContext false
+            ownsConnection = true
             
             // Priority 1: Match standard ADB Interface class (0xFF, 0x42, 0x01)
-            for (i in 0 until device.interfaceCount) {
-                val iface = device.getInterface(i)
+            for (i in 0 until dev.interfaceCount) {
+                val iface = dev.getInterface(i)
                 if (iface.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC &&
                     iface.interfaceSubclass == 0x42 &&
                     iface.interfaceProtocol == 0x01
@@ -179,9 +188,9 @@ class AdbProtocolClient(
                 }
             }
 
-            // Priority 2: Generic Bulk Interface fallback (e.g. customized ADB descriptors)
-            for (i in 0 until device.interfaceCount) {
-                val iface = device.getInterface(i)
+            // Priority 2: Generic Bulk Interface fallback
+            for (i in 0 until dev.interfaceCount) {
+                val iface = dev.getInterface(i)
                 var inEp: UsbEndpoint? = null
                 var outEp: UsbEndpoint? = null
                 for (j in 0 until iface.endpointCount) {
@@ -209,11 +218,17 @@ class AdbProtocolClient(
     }
 
     fun close() {
-        try {
-            adbInterface?.let { connection?.releaseInterface(it) }
-            connection?.close()
-        } catch (_: Exception) {}
-        connection = null
+        isConnected = false
+        if (ownsConnection) {
+            try {
+                adbInterface?.let { connection?.releaseInterface(it) }
+                connection?.close()
+            } catch (_: Exception) {}
+            connection = null
+        }
+        inEndpoint = null
+        outEndpoint = null
+        adbInterface = null
     }
 
     private fun sendPacket(cmd: Int, arg0: Int, arg1: Int, data: ByteArray? = null): Boolean {
@@ -283,19 +298,29 @@ class AdbProtocolClient(
     }
 
     suspend fun connect(context: Context, onAuthPrompt: (() -> Unit)? = null): Boolean = withContext(Dispatchers.IO) {
+        if (isConnected) return@withContext true
+
         val banner = "host::MTKUnlockTool\u0000".toByteArray(Charsets.UTF_8)
         if (!sendPacket(A_CNXN, ADB_VERSION, MAX_PAYLOAD, banner)) {
+            isConnected = false
             return@withContext false
         }
-        var response = readPacket(3000) ?: return@withContext false
+        var response = readPacket(3000) ?: run {
+            isConnected = false
+            return@withContext false
+        }
         var cmd = response.first[0]
 
         if (cmd == A_CNXN) {
+            isConnected = true
             return@withContext true
         }
 
         if (cmd == A_AUTH) {
-            val token = response.second ?: return@withContext false
+            val token = response.second ?: run {
+                isConnected = false
+                return@withContext false
+            }
             val keyPair = getOrCreateKeyPair(context)
             val privKey = keyPair.private as RSAPrivateKey
             val pubKey = keyPair.public as RSAPublicKey
@@ -306,6 +331,7 @@ class AdbProtocolClient(
                 if (sendPacket(A_AUTH, ADB_AUTH_SIGNATURE, 0, signature)) {
                     val authResp = readPacket(1500)
                     if (authResp != null && authResp.first[0] == A_CNXN) {
+                        isConnected = true
                         return@withContext true
                     }
                 }
@@ -314,17 +340,19 @@ class AdbProtocolClient(
             // 2. Not authorized yet: Send RSAPUBLICKEY to prompt target phone screen
             val pubPayload = getAdbPublicKeyPayload(pubKey)
             if (!sendPacket(A_AUTH, ADB_AUTH_RSAPUBLICKEY, 0, pubPayload)) {
+                isConnected = false
                 return@withContext false
             }
 
             onAuthPrompt?.invoke()
 
-            // 3. Poll and wait up to 15 seconds for user to tap "Allow" on target phone screen
+            // 3. Poll and wait up to 20 seconds for user to tap "Allow" on target phone screen
             val startTime = System.currentTimeMillis()
-            while (System.currentTimeMillis() - startTime < 15000L) {
+            while (System.currentTimeMillis() - startTime < 20000L) {
                 val authWait = readPacket(2000)
                 if (authWait != null) {
                     if (authWait.first[0] == A_CNXN) {
+                        isConnected = true
                         return@withContext true
                     }
                     if (authWait.first[0] == A_AUTH && authWait.second != null) {
@@ -338,6 +366,7 @@ class AdbProtocolClient(
             }
         }
 
+        isConnected = false
         return@withContext false
     }
 
@@ -345,6 +374,7 @@ class AdbProtocolClient(
         val localId = localIdCounter++
         val dest = "shell:$command\u0000".toByteArray(Charsets.UTF_8)
         if (!sendPacket(A_OPEN, localId, 0, dest)) {
+            isConnected = false
             return@withContext "ERROR: Failed to send A_OPEN to ADB target"
         }
 
@@ -352,7 +382,7 @@ class AdbProtocolClient(
         val sb = StringBuilder()
 
         val startTime = System.currentTimeMillis()
-        while (System.currentTimeMillis() - startTime < 12000L) {
+        while (System.currentTimeMillis() - startTime < 15000L) {
             val packet = readPacket(2500) ?: break
             val cmd = packet.first[0]
             val arg0 = packet.first[1]

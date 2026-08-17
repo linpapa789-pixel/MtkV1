@@ -195,6 +195,40 @@ object MtkDeviceDatabase {
                 MtkDeviceModel("Itel Vision 2s / Vision 3", "MT6762 (Helio P22)", "MT6762", "Hold Vol+ & Vol- -> Insert USB"),
                 MtkDeviceModel("Itel S23+ (Curved AMOLED)", "MT6768 (Helio G85)", "MT6768", "Hold Vol+ & Vol- -> Insert USB")
             )
+        ),
+        MtkBrand(
+            brandName = "Huawei / Honor",
+            iconName = "huawei",
+            models = listOf(
+                MtkDeviceModel("Honor X8a (CRT-LX1/LX2/LX3)", "MT6768 (Helio G88)", "MT6768", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Honor X5 / X5 Plus", "MT6765 (Helio G36)", "MT6765", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Honor X6 / X6a (WDY-LX1)", "MT6765 (Helio G25/G36)", "MT6765", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Honor Play 9A / 9C", "MT6765 (Helio P35)", "MT6765", "Hold Vol+ & Vol- or TestPoint"),
+                MtkDeviceModel("Huawei Y5p / Y6p (MED-LX9)", "MT6762 (Helio P22)", "MT6762", "TestPoint (CMD to GND) / Vol Keys"),
+                MtkDeviceModel("Honor 70 Lite / 90 Lite (CRT-N53)", "MT6833 (Dimensity 6020)", "MT6833", "Hold Vol+ & Vol- -> Insert USB")
+            )
+        ),
+        MtkBrand(
+            brandName = "Motorola / Lenovo",
+            iconName = "motorola",
+            models = listOf(
+                MtkDeviceModel("Moto E7 / E7 Power (XT2097)", "MT6762 (Helio P22/G25)", "MT6762", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Moto E20 (XT2155)", "MT6765 (Unisoc/MTK)", "MT6765", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Moto G22 (XT2231)", "MT6765 (Helio G37)", "MT6765", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Moto G24 / G24 Power", "MT6768 (Helio G85)", "MT6768", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Lenovo Tab M8 / M10 HD (TB-X306)", "MT6762 (Helio P22T)", "MT6762", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("Lenovo Tab M10 Plus (TB-X606)", "MT6765 (Helio P22T)", "MT6765", "Hold Vol+ & Vol- -> Insert USB")
+            )
+        ),
+        MtkBrand(
+            brandName = "OnePlus",
+            iconName = "oneplus",
+            models = listOf(
+                MtkDeviceModel("OnePlus Nord 2 5G (DN2101/DN2103)", "MT6893 (Dimensity 1200-AI)", "MT6893", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("OnePlus Nord 2T 5G (CPH2399)", "MT6893 (Dimensity 1300)", "MT6893", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("OnePlus Nord 3 5G (CPH2491/CPH2493)", "MT6895 (Dimensity 9000)", "MT6895", "Hold Vol+ & Vol- -> Insert USB"),
+                MtkDeviceModel("OnePlus Pad / Pad Go (OPD2203)", "MT6895 (Dimensity 9000/G99)", "MT6895", "Hold Vol+ & Vol- -> Insert USB")
+            )
         )
     )
 

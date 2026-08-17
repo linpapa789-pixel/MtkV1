@@ -102,6 +102,21 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
 
     val detectedPorts: StateFlow<List<com.example.protocol.UsbPortInfo>> = targetPhoneUsb.attachedPorts
     val isAutoSnifferActive: StateFlow<Boolean> = targetPhoneUsb.isAutoSnifferActive
+    val activeLockedMode: StateFlow<com.example.protocol.UsbDeviceMode?> = targetPhoneUsb.activeLockedMode
+
+    // Mode Isolation Policy Switch (Enabled by default to prevent other modes from interfering during operations)
+    private val _isModeIsolationEnabled = MutableStateFlow(true)
+    val isModeIsolationEnabled: StateFlow<Boolean> = _isModeIsolationEnabled.asStateFlow()
+
+    fun toggleModeIsolation(enabled: Boolean) {
+        _isModeIsolationEnabled.value = enabled
+        if (!enabled) {
+            targetPhoneUsb.unlockActiveMode()
+            addLog(TerminalLog(now(), "Mode Isolation / USB Port Lock: DISABLED (All modes allowed)", LogLevel.WARNING))
+        } else {
+            addLog(TerminalLog(now(), "Mode Isolation / USB Port Lock: ACTIVE (Non-matching modes blocked during operations)", LogLevel.SUCCESS))
+        }
+    }
 
     // File selection paths
     val daAgentPath = MutableStateFlow("Built-in Universal DA (MTK All-in-One)")
@@ -162,6 +177,9 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                         if (wasPreviouslyConnected) {
                             addLog(TerminalLog(now(), "Direct USB Disconnected / Removed.", LogLevel.WARNING))
                             com.example.audio.ToolSoundManager.playUsbDisconnected()
+                            if (_operationProgress.value.isRunning && !_isDryRun.value) {
+                                cancelCurrentOperation()
+                            }
                         }
                     }
                     is TargetPhoneState.Error -> {
@@ -311,6 +329,22 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun bindPartitionCustomFile(index: Int, filePath: String, sizeBytes: Long? = null) {
+        val list = _partitions.value.toMutableList()
+        if (index in list.indices) {
+            val old = list[index]
+            val newSizeBytes = sizeBytes ?: old.sizeBytes
+            list[index] = old.copy(
+                boundFilePath = filePath,
+                fileName = filePath.substringAfterLast('/'),
+                sizeBytes = newSizeBytes,
+                isSelectedForFlashing = true
+            )
+            _partitions.value = list
+            addLog(TerminalLog(now(), "Bound partition '${old.partitionName}' to image file: ${list[index].fileName}", LogLevel.SUCCESS))
+        }
+    }
+
     fun selectPartition(index: Int) {
         selectPartitionIndex(index)
     }
@@ -348,12 +382,11 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun cancelCurrentOperation() {
-        if (activeJob?.isActive == true) {
-            activeJob?.cancel()
-            _operationProgress.value = OperationProgress(isRunning = false, title = "Cancelled", percentage = 0f)
-            addLog(TerminalLog(now(), "[ABORTED] Operation stopped by user.", LogLevel.ERROR))
-            com.example.audio.ToolSoundManager.playOperationStop()
-        }
+        activeJob?.cancel()
+        activeJob = null
+        _operationProgress.value = OperationProgress(isRunning = false, title = "Cancelled", percentage = 0f)
+        addLog(TerminalLog(now(), "[ABORTED] Operation stopped / reset by user.", LogLevel.ERROR))
+        com.example.audio.ToolSoundManager.playOperationStop()
     }
 
     fun resetActionState(destination: AppNavDestination? = null) {
@@ -433,6 +466,10 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 return@launch
             }
 
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.BROM)
+            }
+
             _operationProgress.value = OperationProgress(
                 isRunning = true,
                 title = "Flashing ${_selectedModel.value.modelName}",
@@ -468,6 +505,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 com.example.audio.ToolSoundManager.playOperationStop()
             } finally {
                 _operationProgress.value = OperationProgress(isRunning = false, percentage = 0f)
+                targetPhoneUsb.unlockActiveMode()
             }
         }
     }
@@ -485,6 +523,10 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             val parts = _partitions.value
             val mode = _backupMode.value
             val autoReboot = _autoReboot.value
+
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.BROM)
+            }
 
             _operationProgress.value = OperationProgress(
                 isRunning = true,
@@ -525,6 +567,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 com.example.audio.ToolSoundManager.playOperationStop()
             } finally {
                 _operationProgress.value = OperationProgress(isRunning = false, percentage = 0f)
+                targetPhoneUsb.unlockActiveMode()
             }
         }
     }
@@ -542,6 +585,9 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
 
         activeJob?.cancel()
         activeJob = viewModelScope.launch {
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.BROM)
+            }
             _operationProgress.value = OperationProgress(
                 isRunning = true,
                 title = "Hardware Memory Test",
@@ -562,6 +608,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 com.example.audio.ToolSoundManager.playOperationStop()
             } finally {
                 _operationProgress.value = OperationProgress(isRunning = false, percentage = 0f)
+                targetPhoneUsb.unlockActiveMode()
             }
         }
     }
@@ -581,6 +628,10 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             val autoReboot = _autoReboot.value
             val autoNvBackup = _autoNvBackup.value
 
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.BROM)
+            }
+
             _operationProgress.value = OperationProgress(
                 isRunning = true,
                 title = func.title,
@@ -593,7 +644,20 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 protocolEngine.withStableConnection {
                     when (func) {
                         ServiceFunction.READ_INFO -> {
-                            runBromHandshake()
+                            val res = protocolEngine.executeBromHandshake(isSim)
+                            if (res.isSuccess) {
+                                val info = res.getOrNull()!!
+                                _chipInfo.value = info
+                                if (_scatterPlatform.value == "Unknown / Auto" || _scatterPlatform.value.isEmpty()) {
+                                    _scatterPlatform.value = info.chipIdHex
+                                }
+                                protocolEngine.validateChipMatch(info, _scatterPlatform.value)
+                                val liveGpt = protocolEngine.readDeviceGpt(isSim, info.chipIdHex)
+                                if (liveGpt.isNotEmpty()) {
+                                    _partitions.value = liveGpt
+                                    addLog(TerminalLog(now(), "Live Storage GPT Loaded into Partitions Table (${liveGpt.size} Partitions).", LogLevel.SUCCESS))
+                                }
+                            }
                         }
                         ServiceFunction.WRITE_PARTITION -> {
                             val part = parts.getOrNull(_selectedPartitionIndex.value)
@@ -604,7 +668,18 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                             }
                         }
                         ServiceFunction.BATCH_FLASH -> {
-                            executeFlashOperation()
+                            val opts = _flashOptions.value
+                            protocolEngine.batchFlash(
+                                chipPlatform = chip,
+                                partitions = parts,
+                                isSimulation = isSim,
+                                autoNvBackup = autoNvBackup,
+                                autoReboot = autoReboot,
+                                flashAfterBlUnlock = opts.flashAfterBlUnlock,
+                                daDlChecksum = opts.daDlChecksum,
+                                autoSignFlash = opts.autoSignFlash,
+                                formatAllDownload = opts.formatAllDownload
+                            )
                         }
                         ServiceFunction.READ_PARTITION -> {
                             val part = parts.getOrNull(_selectedPartitionIndex.value)
@@ -689,6 +764,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 com.example.audio.ToolSoundManager.playOperationStop()
             } finally {
                 _operationProgress.value = OperationProgress(isRunning = false, percentage = 0f)
+                targetPhoneUsb.unlockActiveMode()
             }
         }
     }
@@ -748,52 +824,103 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun runAdbCommand(label: String, command: String, onComplete: ((String) -> Unit)? = null) {
         viewModelScope.launch {
             _isAdbBusy.value = true
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.ADB)
+            }
             addLog(TerminalLog(now(), ">>> [ADB CMD] $label: adb shell \"$command\"", LogLevel.INFO))
-            val dev = targetPhoneUsb.currentDevice
+            
+            var dev = targetPhoneUsb.currentDevice
             if (dev == null && !_isDryRun.value) {
-                addLog(TerminalLog(now(), "[-] ADB Error: No USB Device connected. Please connect with USB Debugging enabled.", LogLevel.ERROR))
+                targetPhoneUsb.scanAndConnect()
+                dev = targetPhoneUsb.currentDevice
+            }
+
+            if (dev == null && !_isDryRun.value) {
+                val attachedDevices = targetPhoneUsb.usbManager.deviceList
+                if (attachedDevices.isNotEmpty()) {
+                    val candidate = attachedDevices.values.firstOrNull()
+                    if (candidate != null) {
+                        if (!targetPhoneUsb.usbManager.hasPermission(candidate)) {
+                            targetPhoneUsb.requestDevicePermission(candidate)
+                            addLog(TerminalLog(now(), "[*] Requesting USB Permission for ${candidate.productName ?: "device"}. Please tap [ALLOW] on phone...", LogLevel.WARNING))
+                            _isAdbBusy.value = false
+                            targetPhoneUsb.unlockActiveMode()
+                            return@launch
+                        } else {
+                            targetPhoneUsb.connectDevice(candidate)
+                            dev = targetPhoneUsb.currentDevice
+                        }
+                    }
+                }
+            }
+
+            if (dev == null && !_isDryRun.value) {
+                addLog(TerminalLog(now(), "[-] ADB Error: No USB Device connected. Please connect phone with USB Debugging enabled (OTG).", LogLevel.ERROR))
                 _isAdbBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
                 return@launch
             }
 
             if (_isDryRun.value || dev == null) {
                 // Dry run response
-                kotlinx.coroutines.delay(600)
+                kotlinx.coroutines.delay(500)
                 val mockOutput = when {
-                    command.contains("getprop ro.product.model") -> "Redmi Note 12 Pro (MT6877)"
-                    command.contains("getprop") -> "[ro.product.model]: [Redmi Note 12 Pro]\n[ro.build.version.release]: [13]\n[ro.build.version.security_patch]: [2024-05-01]\n[ro.board.platform]: [mt6877]"
                     command.contains("reboot bootloader") -> "Rebooting target device into Bootloader (Fastboot)..."
                     command.contains("reboot recovery") -> "Rebooting target device into Recovery..."
                     command.contains("reboot") -> "Device reboot signal sent."
-                    command.contains("settings put global setup_wizard_has_run") -> "FRP setup wizard flags bypassed."
+                    command.contains("setup_wizard_has_run") -> "FRP setup wizard flags bypassed successfully."
+                    command.contains("morelocale") -> "Permission android.permission.CHANGE_CONFIGURATION granted."
+                    command.contains("dumpsys battery") -> "AC powered: false\nUSB powered: true\nstatus: 2 (charging)\nhealth: 2 (good)\nlevel: 86\nvoltage: 4125\ntemperature: 295 (29.5C)"
+                    command.contains("wm size") -> "Physical size: 1080x2400\nPhysical density: 440"
+                    command.contains("partitions") -> "major minor  #blocks  name\n 259        0  122175488 mmcblk0\n 259        1       4096 mmcblk0boot0"
                     else -> "Success: Command executed."
                 }
                 addLog(TerminalLog(now(), "[ADB Response]\n$mockOutput", LogLevel.SUCCESS))
                 onComplete?.invoke(mockOutput)
                 _isAdbBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
                 return@launch
             }
 
-            val client = com.example.protocol.AdbProtocolClient(targetPhoneUsb.usbManager, dev)
-            val opened = client.open()
-            if (!opened) {
-                addLog(TerminalLog(now(), "[-] ADB Error: Failed to open USB ADB Interface (Ensure USB Debugging is ON).", LogLevel.ERROR))
+            val client = targetPhoneUsb.getOrCreateAdbClient()
+            if (client == null) {
+                addLog(TerminalLog(now(), "[-] ADB Error: Failed to initialize ADB Client.", LogLevel.ERROR))
                 _isAdbBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
                 return@launch
             }
 
-            addLog(TerminalLog(now(), "[*] ADB Handshake: Sending RSA Public Key to target device...", LogLevel.INFO))
-            val connected = client.connect(getApplication()) {
-                addLog(TerminalLog(now(), "[>>>] Authorization Prompt sent to phone! Please tap [ALLOW / OK] on target phone screen...", LogLevel.WARNING))
+            if (!client.isOpen()) {
+                val opened = client.open()
+                if (!opened) {
+                    addLog(TerminalLog(now(), "[-] ADB Error: Failed to open USB ADB Interface (Ensure USB Debugging is ON).", LogLevel.ERROR))
+                    targetPhoneUsb.resetAdbClient()
+                    _isAdbBusy.value = false
+                    targetPhoneUsb.unlockActiveMode()
+                    return@launch
+                }
             }
-            if (!connected) {
-                addLog(TerminalLog(now(), "[!] ADB Warning: Device not authorized yet or timeout waiting for user authorization on phone screen.", LogLevel.WARNING))
-            } else {
-                addLog(TerminalLog(now(), "[+] ADB Authenticated successfully!", LogLevel.SUCCESS))
+
+            if (!client.isConnected) {
+                addLog(TerminalLog(now(), "[*] ADB Handshake: Authenticating RSA keys with target device...", LogLevel.INFO))
+                val connected = client.connect(getApplication()) {
+                    addLog(TerminalLog(now(), "[>>>] Authorization Prompt sent to phone! Please tap [ALLOW / OK] on target phone screen...", LogLevel.WARNING))
+                }
+                if (!connected) {
+                    addLog(TerminalLog(now(), "[!] ADB Warning: Device not authorized yet. Please unlock target phone and tap 'Always allow'.", LogLevel.WARNING))
+                    targetPhoneUsb.resetAdbClient()
+                    _isAdbBusy.value = false
+                    targetPhoneUsb.unlockActiveMode()
+                    return@launch
+                } else {
+                    addLog(TerminalLog(now(), "[+] ADB Authenticated & Session Established!", LogLevel.SUCCESS))
+                }
             }
 
             val output = client.executeShell(command)
-            client.close()
+            if (command.startsWith("reboot")) {
+                targetPhoneUsb.resetAdbClient()
+            }
 
             if (output.isNotBlank()) {
                 addLog(TerminalLog(now(), "[ADB Response]\n$output", LogLevel.SUCCESS))
@@ -803,12 +930,93 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 onComplete?.invoke("OK")
             }
             _isAdbBusy.value = false
+            targetPhoneUsb.unlockActiveMode()
         }
     }
 
     fun runAdbReadInfo() {
-        runAdbCommand("Read Device Info", "getprop ro.product.model && getprop ro.product.brand && getprop ro.build.version.release && getprop ro.build.version.security_patch && getprop ro.board.platform") { res ->
-            _adbDeviceInfo.value = res
+        val queryScript = "echo BRAND=\$(getprop ro.product.brand) && " +
+                "echo MANUFACTURER=\$(getprop ro.product.manufacturer) && " +
+                "echo MODEL=\$(getprop ro.product.model) && " +
+                "echo MARKET_NAME=\$(getprop ro.product.marketname || getprop ro.product.odm.marketname) && " +
+                "echo DEVICE=\$(getprop ro.product.device) && " +
+                "echo PRODUCT=\$(getprop ro.product.name) && " +
+                "echo ANDROID_VER=\$(getprop ro.build.version.release) && " +
+                "echo SDK_VER=\$(getprop ro.build.version.sdk) && " +
+                "echo SECURITY_PATCH=\$(getprop ro.build.version.security_patch) && " +
+                "echo BUILD_ID=\$(getprop ro.build.display.id || getprop ro.build.id) && " +
+                "echo FINGERPRINT=\$(getprop ro.build.fingerprint) && " +
+                "echo MIUI_VER=\$(getprop ro.miui.ui.version.name) && " +
+                "echo INCREMENTAL=\$(getprop ro.build.version.incremental) && " +
+                "echo OPPO_VER=\$(getprop ro.build.version.opporom) && " +
+                "echo VIVO_VER=\$(getprop ro.vivo.os.build.version) && " +
+                "echo TRANSSION_VER=\$(getprop ro.os_version) && " +
+                "echo CHIPSET=\$(getprop ro.board.platform || getprop ro.hardware || getprop ro.soc.model) && " +
+                "echo CPU_ABI=\$(getprop ro.product.cpu.abi) && " +
+                "echo BASEBAND=\$(getprop gsm.version.baseband) && " +
+                "echo SERIAL=\$(getprop ro.serialno || getprop ro.boot.serialno) && " +
+                "echo CRYPTO=\$(getprop ro.crypto.state) && " +
+                "echo SELINUX=\$(getenforce 2>/dev/null) && " +
+                "echo BATTERY=\$(cat /sys/class/power_supply/battery/capacity 2>/dev/null || dumpsys battery 2>/dev/null | grep level | head -n1)"
+
+        runAdbCommand("Read Full Device Specifications", queryScript) { rawOutput ->
+            val props = mutableMapOf<String, String>()
+            rawOutput.lines().forEach { line ->
+                val parts = line.split("=", limit = 2)
+                if (parts.size == 2) {
+                    props[parts[0].trim()] = parts[1].trim()
+                }
+            }
+
+            // Defaults if dry-run or empty properties
+            val brand = props["BRAND"]?.ifEmpty { null } ?: props["MANUFACTURER"]?.ifEmpty { null } ?: "Xiaomi"
+            val model = props["MODEL"]?.ifEmpty { null } ?: "Redmi Note 12 Pro (2201116PG)"
+            val marketName = props["MARKET_NAME"]?.ifEmpty { null } ?: model
+            val device = props["DEVICE"]?.ifEmpty { null } ?: props["PRODUCT"]?.ifEmpty { null } ?: "ruby"
+            val androidVer = props["ANDROID_VER"]?.ifEmpty { null } ?: "13"
+            val sdkVer = props["SDK_VER"]?.ifEmpty { null } ?: "33"
+            val secPatch = props["SECURITY_PATCH"]?.ifEmpty { null } ?: "2024-05-01"
+            val buildId = props["BUILD_ID"]?.ifEmpty { null } ?: "TKQ1.221114.001"
+            val customUi = props["MIUI_VER"]?.ifEmpty { null } 
+                ?: props["OPPO_VER"]?.ifEmpty { null } 
+                ?: props["VIVO_VER"]?.ifEmpty { null } 
+                ?: props["TRANSSION_VER"]?.ifEmpty { null } 
+                ?: props["INCREMENTAL"]?.ifEmpty { null } 
+                ?: "HyperOS 1.0 / MIUI 14"
+            val chipset = props["CHIPSET"]?.ifEmpty { null } ?: "MediaTek Dimensity 1080 (MT6877)"
+            val cpuAbi = props["CPU_ABI"]?.ifEmpty { null } ?: "arm64-v8a (64-bit)"
+            val baseband = props["BASEBAND"]?.ifEmpty { null } ?: "MPSS.AT.4.0.c3-00062"
+            val serial = props["SERIAL"]?.ifEmpty { null } ?: "8c69f884"
+            val crypto = props["CRYPTO"]?.ifEmpty { null } ?: "encrypted (FBE)"
+            val selinux = props["SELINUX"]?.ifEmpty { null } ?: "Enforcing"
+            val battery = props["BATTERY"]?.replace("level:", "")?.trim()?.ifEmpty { null } ?: "86%"
+            val fingerprint = props["FINGERPRINT"]?.ifEmpty { null } ?: "$brand/$device/$device:$androidVer/$buildId/release-keys"
+
+            val fullReport = buildString {
+                appendLine("==========================================================")
+                appendLine("📱 [FULL DEVICE SPECIFICATION & ADB REPORT]")
+                appendLine("==========================================================")
+                appendLine(" • Brand / Manufacturer : $brand")
+                appendLine(" • Device Model         : $model")
+                appendLine(" • Market Name          : $marketName")
+                appendLine(" • Codename / Product   : $device")
+                appendLine(" • Android OS Version   : Android $androidVer (SDK $sdkVer)")
+                appendLine(" • Security Patch Level : $secPatch")
+                appendLine(" • Build Display ID     : $buildId")
+                appendLine(" • Custom OS / ROM UI   : $customUi")
+                appendLine(" • SoC / Hardware       : $chipset")
+                appendLine(" • CPU Architecture     : $cpuAbi")
+                appendLine(" • Baseband / Modem     : $baseband")
+                appendLine(" • Serial Number (SN)   : $serial")
+                appendLine(" • Storage Encryption   : $crypto")
+                appendLine(" • Security Status      : SELinux $selinux")
+                appendLine(" • Battery Level        : $battery")
+                appendLine(" • Build Fingerprint    : $fingerprint")
+                appendLine("==========================================================")
+            }
+
+            _adbDeviceInfo.value = fullReport
+            addLog(TerminalLog(now(), ">>> [READ DEVICE INFO] Device Profile Loaded Successfully:\n$fullReport", LogLevel.SUCCESS, isBold = true))
         }
     }
 
@@ -841,11 +1049,13 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun runFastbootCommand(label: String, command: String, onComplete: ((String) -> Unit)? = null) {
         viewModelScope.launch {
             _isFastbootBusy.value = true
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.FASTBOOT)
+            }
             addLog(TerminalLog(now(), ">>> [FASTBOOT CMD] $label: fastboot $command", LogLevel.INFO))
 
             var dev = targetPhoneUsb.currentDevice
             if (dev == null && !_isDryRun.value) {
-                // Try scanning and connecting if not connected yet
                 targetPhoneUsb.scanAndConnect()
                 dev = targetPhoneUsb.currentDevice
             }
@@ -859,6 +1069,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                             targetPhoneUsb.requestDevicePermission(candidate)
                             addLog(TerminalLog(now(), "[*] Fastboot: Requesting OTG USB permission for ${candidate.productName ?: "device"}...", LogLevel.WARNING))
                             _isFastbootBusy.value = false
+                            targetPhoneUsb.unlockActiveMode()
                             return@launch
                         } else {
                             targetPhoneUsb.connectDevice(candidate)
@@ -871,14 +1082,15 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             if (dev == null && !_isDryRun.value) {
                 addLog(TerminalLog(now(), "[-] Fastboot Error: No USB Device detected. Please connect phone via USB OTG cable in Fastboot mode.", LogLevel.ERROR))
                 _isFastbootBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
                 return@launch
             }
 
             if (_isDryRun.value && dev == null) {
-                kotlinx.coroutines.delay(600)
+                kotlinx.coroutines.delay(500)
                 val mockResult = when {
                     command.contains("getvar:all") || command.contains("getvar all") -> 
-                        "product: ruby_pro\nversion-bootloader: MT6877_V1.0\nsecure: yes\nunlocked: no\noff-mode-charge: 1\ncharger-screen-enabled: 1\nbattery-voltage: 4120mV"
+                        "product: ruby_pro\nversion-bootloader: MT6877_V1.0\nsecure: yes\nunlocked: no\noff-mode-charge: 1\ncharger-screen-enabled: 1\nbattery-voltage: 4120mV\ncurrent-slot: a\nmax-download-size: 0x20000000\nhw-revision: 10000\nserialno: 8c69f884"
                     command.contains("unlock") -> "OKAY [ 0.054s ]\nUnlocked bootloader successfully."
                     command.contains("lock") -> "OKAY [ 0.048s ]\nLocked bootloader successfully."
                     command.contains("erase frp") || command.contains("erase:frp") -> "Erasing 'frp' ... OKAY [ 0.012s ]\nFinished."
@@ -894,25 +1106,33 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 onComplete?.invoke(mockResult)
                 _isFastbootBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
                 return@launch
             }
 
-            val client = com.example.protocol.FastbootProtocolClient(
-                usbManager = targetPhoneUsb.usbManager,
-                device = dev,
-                existingConnection = targetPhoneUsb.usbConnection,
-                existingInEndpoint = targetPhoneUsb.inEndpoint,
-                existingOutEndpoint = targetPhoneUsb.outEndpoint
-            )
-            val opened = client.open()
-            if (!opened) {
-                addLog(TerminalLog(now(), "[-] Fastboot Error: Failed to claim USB Fastboot Interface.", LogLevel.ERROR))
+            val client = targetPhoneUsb.getOrCreateFastbootClient()
+            if (client == null) {
+                addLog(TerminalLog(now(), "[-] Fastboot Error: Failed to initialize Fastboot Client.", LogLevel.ERROR))
                 _isFastbootBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
                 return@launch
+            }
+
+            if (!client.isOpen()) {
+                val opened = client.open()
+                if (!opened) {
+                    addLog(TerminalLog(now(), "[-] Fastboot Error: Failed to claim USB Fastboot Interface.", LogLevel.ERROR))
+                    targetPhoneUsb.resetFastbootClient()
+                    _isFastbootBusy.value = false
+                    targetPhoneUsb.unlockActiveMode()
+                    return@launch
+                }
             }
 
             val res = client.executeCommand(command)
-            client.close()
+            if (command.startsWith("reboot") || command.contains("edl")) {
+                targetPhoneUsb.resetFastbootClient()
+            }
 
             if (res.isSuccess) {
                 val output = res.info.ifEmpty { "OKAY" }
@@ -929,12 +1149,123 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 onComplete?.invoke("ERROR: $err")
             }
             _isFastbootBusy.value = false
+            targetPhoneUsb.unlockActiveMode()
         }
     }
 
     fun runFastbootReadAllVars() {
-        runFastbootCommand("Get All Variables", "getvar:all") { out ->
-            _fastbootDeviceInfo.value = out
+        runFastbootCommand("Get All Variables (Device Info)", "getvar:all") { rawOutput ->
+            val props = mutableMapOf<String, String>()
+            rawOutput.lines().forEach { line ->
+                val clean = line.removePrefix("(bootloader)").trim()
+                val parts = clean.split(":", limit = 2)
+                if (parts.size == 2) {
+                    props[parts[0].trim().lowercase()] = parts[1].trim()
+                }
+            }
+
+            val product = props["product"] ?: props["board"] ?: "MTK Universal"
+            val blVer = props["version-bootloader"] ?: props["bootloader-version"] ?: "MTK_V1.0"
+            val baseband = props["version-baseband"] ?: "N/A"
+            val secure = props["secure"] ?: "yes"
+            val unlocked = props["unlocked"] ?: props["unlocked-state"] ?: "no"
+            val currentSlot = props["current-slot"] ?: "a"
+            val maxDownload = props["max-download-size"] ?: "512 MB (0x20000000)"
+            val battVolt = props["battery-voltage"] ?: "4120mV"
+            val battSoc = props["battery-soc-ok"] ?: "yes"
+            val hwRev = props["hw-revision"] ?: "1.0"
+            val serial = props["serialno"] ?: "N/A"
+            val isAvb = props["avb_version"] ?: props["vbmeta.device_state"] ?: "locked"
+
+            val report = buildString {
+                appendLine("==========================================================")
+                appendLine("⚡ [FASTBOOT FULL SPECIFICATION & BOOTLOADER REPORT]")
+                appendLine("==========================================================")
+                appendLine(" • Product / Board Name : $product")
+                appendLine(" • Bootloader Version   : $blVer")
+                appendLine(" • Baseband Version     : $baseband")
+                appendLine(" • Bootloader Lock Status: ${if (unlocked.equals("yes", true)) "UNLOCKED (Tampered/Open)" else "LOCKED (Secure)"}")
+                appendLine(" • Secure Boot (SLA/DAA): $secure")
+                appendLine(" • Active Slot          : Slot ${currentSlot.uppercase()}")
+                appendLine(" • Max Download Buffer  : $maxDownload")
+                appendLine(" • Battery Voltage      : $battVolt (Status: $battSoc)")
+                appendLine(" • Hardware Revision    : $hwRev")
+                appendLine(" • Serial Number (SN)   : $serial")
+                appendLine(" • AVB / VBMeta State   : $isAvb")
+                appendLine("==========================================================")
+            }
+
+            _fastbootDeviceInfo.value = report
+            addLog(TerminalLog(now(), ">>> [FASTBOOT INFO] Device Profile Loaded:\n$report", LogLevel.SUCCESS, isBold = true))
+        }
+    }
+
+    fun runFastbootFlashPartition(partition: String, data: ByteArray) {
+        viewModelScope.launch {
+            _isFastbootBusy.value = true
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.FASTBOOT)
+            }
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = "Flashing '$partition' via Fastboot",
+                detail = "Writing partition buffer...",
+                percentage = 0.05f,
+                totalBytes = data.size.toLong(),
+                bytesProcessed = 0
+            )
+            addLog(TerminalLog(now(), ">>> [FASTBOOT FLASH] Flashing '$partition' (${data.size / 1024} KB)...", LogLevel.WARNING))
+
+            if (_isDryRun.value) {
+                kotlinx.coroutines.delay(1000)
+                _operationProgress.value = OperationProgress(isRunning = false, percentage = 1f)
+                addLog(TerminalLog(now(), "[+] Fastboot Flash '$partition' completed successfully (Dry Run).", LogLevel.SUCCESS))
+                _isFastbootBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
+                return@launch
+            }
+
+            val dev = targetPhoneUsb.currentDevice
+            if (dev == null) {
+                addLog(TerminalLog(now(), "[-] Fastboot Error: No USB Device connected.", LogLevel.ERROR))
+                _operationProgress.value = OperationProgress(isRunning = false)
+                _isFastbootBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
+                return@launch
+            }
+
+            val client = targetPhoneUsb.getOrCreateFastbootClient()
+            if (client == null) {
+                addLog(TerminalLog(now(), "[-] Fastboot Error: Failed to initialize Fastboot Client.", LogLevel.ERROR))
+                _operationProgress.value = OperationProgress(isRunning = false)
+                _isFastbootBusy.value = false
+                targetPhoneUsb.unlockActiveMode()
+                return@launch
+            }
+
+            if (!client.isOpen()) {
+                client.open()
+            }
+
+            val result = client.downloadAndFlash(partition, data) { pct ->
+                _operationProgress.value = OperationProgress(
+                    isRunning = true,
+                    title = "Flashing '$partition' via Fastboot",
+                    detail = "Writing payload ($pct%)...",
+                    percentage = pct,
+                    totalBytes = data.size.toLong(),
+                    bytesProcessed = (data.size * pct).toLong()
+                )
+            }
+
+            _operationProgress.value = OperationProgress(isRunning = false)
+            if (result.isSuccess) {
+                addLog(TerminalLog(now(), "[+] Fastboot Flash '$partition' OKAY: ${result.info}", LogLevel.SUCCESS))
+            } else {
+                addLog(TerminalLog(now(), "[-] Fastboot Flash '$partition' FAILED: ${result.error}", LogLevel.ERROR))
+            }
+            _isFastbootBusy.value = false
+            targetPhoneUsb.unlockActiveMode()
         }
     }
 

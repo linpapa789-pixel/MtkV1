@@ -8,7 +8,9 @@ import com.example.model.TerminalLog
 import com.example.parser.GptParser
 import com.example.parser.ScatterParser
 import com.example.storage.BackupStorageManager
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -91,12 +93,12 @@ class MtkBromProtocolEngine(
     /**
      * Actively waits and sniffs for target MTK phone to be plugged in while holding Vol keys.
      */
-    private suspend fun ensureTargetConnected(isSimulation: Boolean, timeoutSec: Int = 30): Boolean {
+    private suspend fun ensureTargetConnected(isSimulation: Boolean, timeoutSec: Int = 60): Boolean {
         if (isSimulation) return true
         if (targetPhoneUsb.isConnected()) return true
 
         log("==================================================", LogLevel.WARNING)
-        log(">>> [WAITING FOR MTK BROM PORT] ⏳ Sniffing Active...", LogLevel.WARNING)
+        log(">>> [WAITING FOR MTK BROM PORT] ⏳ Sniffing Active (Auto-Detect)...", LogLevel.WARNING)
         log("ACTION REQUIRED:", LogLevel.INFO)
         log(" 1. Power OFF the target phone completely.", LogLevel.INFO)
         log(" 2. Press & HOLD [Volume Up + Volume Down] (or Test-Point).", LogLevel.INFO)
@@ -104,9 +106,19 @@ class MtkBromProtocolEngine(
         log("==================================================", LogLevel.WARNING)
 
         val startTime = System.currentTimeMillis()
-        var lastDebugLogTime = 0L
 
         while (System.currentTimeMillis() - startTime < timeoutSec * 1000L) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+
+            if (targetPhoneUsb.isConnected()) {
+                log("[+] MediaTek Port DETECTED! Blasting BROM Handshake Sync...", LogLevel.SUCCESS)
+                val synced = targetPhoneUsb.blastBromHandshakeSync(10)
+                if (synced) {
+                    log("[+] BROM Handshake Sync Locked (0x5F 0xF5 0xAF 0xFA)!", LogLevel.SUCCESS)
+                }
+                return true
+            }
+
             val now = System.currentTimeMillis()
             val elapsedSec = ((now - startTime) / 1000).toInt()
             val remainingSec = (timeoutSec - elapsedSec).coerceAtLeast(0)
@@ -116,12 +128,12 @@ class MtkBromProtocolEngine(
                     isRunning = true,
                     title = "Waiting for MTK BROM Port...",
                     detail = "Hold Vol Up+Down & connect USB cable (${remainingSec}s left)",
-                    percentage = (elapsedSec.toFloat() / timeoutSec.toFloat()) * 100f
+                    percentage = (elapsedSec.toFloat() / timeoutSec.toFloat()).coerceIn(0f, 1f)
                 )
             )
 
             val connected = targetPhoneUsb.scanAndConnect()
-            if (connected) {
+            if (connected || targetPhoneUsb.isConnected()) {
                 log("[+] MediaTek Port DETECTED! Blasting BROM Handshake Sync...", LogLevel.SUCCESS)
                 val synced = targetPhoneUsb.blastBromHandshakeSync(10)
                 if (synced) {
@@ -133,6 +145,14 @@ class MtkBromProtocolEngine(
         }
 
         log("[-] ERROR: Device connection timed out (${timeoutSec}s). Please retry with cable reconnect.", LogLevel.ERROR)
+        progressCallback(
+            OperationProgress(
+                isRunning = false,
+                title = "Timeout",
+                detail = "Device connection timed out",
+                percentage = 0f
+            )
+        )
         return false
     }
 
@@ -563,7 +583,10 @@ class MtkBromProtocolEngine(
         isSimulation: Boolean,
         isSubOperation: Boolean = false
     ): Result<String> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log(">>> [READ PARTITION] '${partition.partitionName}' (${partition.partitionSizeHex})", LogLevel.INFO)
         log("Region: ${partition.region} | Start Address: ${partition.linearStartAddrHex}", LogLevel.INFO)
 
@@ -644,7 +667,10 @@ class MtkBromProtocolEngine(
         autoReboot: Boolean = true,
         isSubOperation: Boolean = false
     ): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log("==================================================", LogLevel.INFO)
         log(">>> [WRITE PARTITION] Initiating for '${partition.partitionName}'", LogLevel.WARNING)
         log("Policy: Automatic Verification & Safety Checks", LogLevel.INFO)
@@ -960,7 +986,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun dumpAllPartitions(partitions: List<PartitionEntry>, isSimulation: Boolean): Result<List<String>> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         printGptAddresses(partitions)
         log("=== [FULL ROM DUMP] Reading All Partitions to Archive ===", LogLevel.INFO)
         val dumps = mutableListOf<String>()
@@ -982,7 +1011,10 @@ class MtkBromProtocolEngine(
         partitions: List<PartitionEntry>,
         isSimulation: Boolean
     ): Result<List<String>> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         printGptAddresses(partitions)
         val path = performAutoBackupAndScatterPipeline(chipPlatform, partitions, isSimulation)
         log("NVRAM Backup & Scatter Build finished successfully at: $path", LogLevel.SUCCESS)
@@ -990,7 +1022,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun bypassAuth(isSimulation: Boolean): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log(">>> [BYPASS AUTH] Executing USB Control Transfer (Kamakiri SLA/DAA Bypass)...", LogLevel.WARNING)
         val rawFd = targetPhoneUsb.getFileDescriptor()
         log("USB Native File Descriptor: ${if (rawFd >= 0) rawFd else "Simulated"}", LogLevel.INFO)
@@ -1010,7 +1045,10 @@ class MtkBromProtocolEngine(
         autoNvBackup: Boolean = true,
         autoReboot: Boolean = true
     ): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         if (autoNvBackup) {
             performAutoBackupAndScatterPipeline(chipPlatform, partitions, isSimulation)
         } else {
@@ -1039,7 +1077,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun unlockBootloader(isSimulation: Boolean, autoReboot: Boolean = true): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log(">>> [UNLOCK BOOTLOADER] Writing Magic SCFG (0x47464353) to seccfg...", LogLevel.WARNING)
         
         // Real Seccfg Unlock Block Payload (SCFG magic header + unlock flag)
@@ -1067,7 +1108,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun lockBootloader(isSimulation: Boolean, autoReboot: Boolean = true): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log(">>> [LOCK BOOTLOADER] Restoring seccfg Lock State...", LogLevel.WARNING)
         
         val scfgPayload = ByteArray(512) { 0x00 }
@@ -1096,7 +1140,10 @@ class MtkBromProtocolEngine(
         autoNvBackup: Boolean = true,
         autoReboot: Boolean = true
     ): Result<Boolean> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         printGptAddresses(partitions)
         if (autoNvBackup) {
             performAutoBackupAndScatterPipeline(chipPlatform, partitions, isSimulation)
@@ -1114,7 +1161,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun readGptAndGenerateScatter(chipPlatform: String, partitions: List<PartitionEntry>, isSimulation: Boolean): Result<String> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         printGptAddresses(partitions)
         val scatterPath = storageManager.generateScatterFile(chipPlatform, partitions)
         log("Scatter file generated successfully at: $scatterPath", LogLevel.SUCCESS)
@@ -1122,7 +1172,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun readRpmb(isSimulation: Boolean): Result<String> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log(">>> [READ RPMB] Querying Replay Protected Memory Block...", LogLevel.INFO)
         delay(250)
         val path = storageManager.getBackupDirectory().absolutePath + "/rpmb_dump.bin"
@@ -1131,7 +1184,10 @@ class MtkBromProtocolEngine(
     }
 
     suspend fun readPreloader(isSimulation: Boolean): Result<String> {
-        readDetailedDeviceInfo(isSimulation)
+        val devInfo = readDetailedDeviceInfo(isSimulation)
+        if (devInfo.isFailure && !isSimulation) {
+            return Result.failure(devInfo.exceptionOrNull() ?: IllegalStateException("Target phone not connected via USB"))
+        }
         log(">>> [READ PRELOADER] Reading boot region EMMC_BOOT1...", LogLevel.INFO)
         delay(250)
         val path = storageManager.getBackupDirectory().absolutePath + "/preloader_dump.bin"

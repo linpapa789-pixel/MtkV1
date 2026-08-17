@@ -3,6 +3,7 @@ package com.example.ui.screens
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Menu
@@ -135,6 +137,9 @@ fun UnlockToolFlashScreen(
     val scatterFileName by viewModel.scatterFileName.collectAsState()
     val detectedPorts by viewModel.detectedPorts.collectAsState()
     val isAutoSnifferActive by viewModel.isAutoSnifferActive.collectAsState()
+    val activeLockedMode by viewModel.activeLockedMode.collectAsState()
+    val isModeIsolationEnabled by viewModel.isModeIsolationEnabled.collectAsState()
+    val backupLocation by viewModel.backupLocation.collectAsState()
 
     // Service function selection state
     var selectedServiceOption by remember { mutableStateOf(ServiceFunction.ERASE_FRP) }
@@ -148,17 +153,51 @@ fun UnlockToolFlashScreen(
     var showPortSnifferDialog by remember { mutableStateOf(false) }
     var showBromGuideDialog by remember { mutableStateOf(false) }
 
+    // Helper function to resolve real display name and file size from content URI
+    fun resolveFileInfo(uri: Uri): Pair<String, Long> {
+        var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file.bin"
+        var size = 0L
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (cursor.moveToFirst()) {
+                    if (nameIdx != -1) {
+                        val displayName = cursor.getString(nameIdx)
+                        if (!displayName.isNullOrBlank()) name = displayName
+                    }
+                    if (sizeIdx != -1) {
+                        size = cursor.getLong(sizeIdx)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return Pair(name, size)
+    }
+
+    var partitionPickingIndex by remember { mutableStateOf<Int?>(null) }
+    val partitionImagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        val idx = partitionPickingIndex
+        if (uri != null && idx != null) {
+            val (fileName, fileSize) = resolveFileInfo(uri)
+            viewModel.bindPartitionCustomFile(idx, fileName, if (fileSize > 0) fileSize else null)
+        }
+        partitionPickingIndex = null
+    }
+
     // File pickers
     val scatterPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
             try {
+                val (fileName, _) = resolveFileInfo(it)
                 val inputStream = context.contentResolver.openInputStream(it)
                 val reader = BufferedReader(InputStreamReader(inputStream))
                 val content = reader.readText()
                 reader.close()
-                val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "scatter.txt"
                 viewModel.loadScatterContent(content, fileName)
             } catch (e: Exception) {
                 viewModel.addLog(TerminalLog(getLogTime(), "Failed to load scatter: ${e.message}", LogLevel.ERROR))
@@ -170,7 +209,7 @@ fun UnlockToolFlashScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            val fileName = it.lastPathSegment?.substringAfterLast('/') ?: "MTK_AllInOne_DA.bin"
+            val (fileName, _) = resolveFileInfo(it)
             viewModel.customDaPath.value = fileName
             viewModel.addLog(TerminalLog(getLogTime(), "Custom DA Selected: $fileName", LogLevel.INFO))
         }
@@ -180,7 +219,7 @@ fun UnlockToolFlashScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            val fileName = it.lastPathSegment?.substringAfterLast('/') ?: "preloader.bin"
+            val (fileName, _) = resolveFileInfo(it)
             viewModel.preloaderPath.value = fileName
             viewModel.addLog(TerminalLog(getLogTime(), "Preloader Selected: $fileName", LogLevel.INFO))
         }
@@ -190,9 +229,18 @@ fun UnlockToolFlashScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            val fileName = it.lastPathSegment?.substringAfterLast('/') ?: "auth_sv5.auth"
+            val (fileName, _) = resolveFileInfo(it)
             viewModel.authFilePath.value = fileName
             viewModel.addLog(TerminalLog(getLogTime(), "Auth File Selected: $fileName", LogLevel.INFO))
+        }
+    }
+
+    val backupFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            val path = it.path ?: it.toString()
+            viewModel.setCustomBackupLocation(path)
         }
     }
 
@@ -241,9 +289,12 @@ fun UnlockToolFlashScreen(
         PortSnifferDialog(
             detectedPorts = detectedPorts,
             isAutoSnifferActive = isAutoSnifferActive,
+            activeLockedMode = activeLockedMode,
+            isModeIsolationEnabled = isModeIsolationEnabled,
             onDismiss = { showPortSnifferDialog = false },
             onScanNow = { viewModel.refreshUsbPorts() },
             onToggleAutoSniffer = { viewModel.toggleAutoSniffer(it) },
+            onToggleModeIsolation = { viewModel.toggleModeIsolation(it) },
             onConnectPort = { port ->
                 viewModel.connectSpecificPort(port)
                 showPortSnifferDialog = false
@@ -268,6 +319,9 @@ fun UnlockToolFlashScreen(
             chipInfo = chipInfo,
             targetPhoneState = targetPhoneState,
             detectedPortsCount = detectedPorts.size,
+            activeLockedMode = activeLockedMode,
+            isModeIsolationEnabled = isModeIsolationEnabled,
+            onToggleModeIsolation = { viewModel.toggleModeIsolation(it) },
             onOpenDrawer = onOpenDrawer,
             onScanPorts = { viewModel.refreshUsbPorts() },
             onOpenPortSniffer = { showPortSnifferDialog = true },
@@ -382,14 +436,18 @@ fun UnlockToolFlashScreen(
                                 PartitionSelectionBox(
                                     partitions = partitions,
                                     onToggleAll = { viewModel.selectAllPartitions(it) },
-                                    onTogglePartition = { idx, checked -> viewModel.togglePartitionSelection(idx, checked) }
+                                    onTogglePartition = { idx, checked -> viewModel.togglePartitionSelection(idx, checked) },
+                                    onPickPartitionFile = { idx ->
+                                        partitionPickingIndex = idx
+                                        partitionImagePickerLauncher.launch("*/*")
+                                    }
                                 )
                             }
                         }
 
                         AppNavDestination.BACKUP -> {
                             // GROUP BOX 1: BACKUP SCOPE & PARTITION SELECTION (Backup Tab Only)
-                            GroupBox(title = "1. Backup Scope & Partition Selection", icon = Icons.Default.FolderOpen) {
+                            GroupBox(title = "1. Backup Scope & Output Storage", icon = Icons.Default.FolderOpen) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -430,6 +488,53 @@ fun UnlockToolFlashScreen(
                                         isSelected = backupMode == BackupMode.CUSTOM_PARTITIONS,
                                         onClick = { viewModel.setBackupMode(BackupMode.CUSTOM_PARTITIONS) }
                                     )
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                // Backup Output Location Bar
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Color(0xFF0F172A),
+                                    border = BorderStroke(1.dp, Color(0xFF334155)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { backupFolderPickerLauncher.launch(null) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FolderOpen,
+                                            contentDescription = "Backup Storage Folder",
+                                            tint = Color(0xFF10B981),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Backup Output Directory",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF94A3B8)
+                                            )
+                                            Text(
+                                                text = backupLocation,
+                                                fontSize = 9.5.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = Color(0xFFF1F5F9),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Text(
+                                            text = "Change",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                    }
                                 }
 
                                 if (backupMode == BackupMode.CUSTOM_PARTITIONS && partitions.isNotEmpty()) {
@@ -545,6 +650,29 @@ fun UnlockToolFlashScreen(
                                             modifier = Modifier.weight(1f)
                                         ) { selectedServiceOption = ServiceFunction.CRASH_TO_BROM }
                                     }
+
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        ServiceSelectCard(
+                                            title = "Bypass SLA/DAA Auth",
+                                            isSelected = selectedServiceOption == ServiceFunction.BYPASS_AUTH,
+                                            accentColor = Color(0xFF14B8A6),
+                                            modifier = Modifier.weight(1f)
+                                        ) { selectedServiceOption = ServiceFunction.BYPASS_AUTH }
+
+                                        ServiceSelectCard(
+                                            title = "Memory Health Test",
+                                            isSelected = selectedServiceOption == ServiceFunction.MEMORY_TEST,
+                                            accentColor = Color(0xFF3B82F6),
+                                            modifier = Modifier.weight(1f)
+                                        ) { selectedServiceOption = ServiceFunction.MEMORY_TEST }
+
+                                        ServiceSelectCard(
+                                            title = "Backup NVRAM & Scatter",
+                                            isSelected = selectedServiceOption == ServiceFunction.BACKUP_NVRAM,
+                                            accentColor = Color(0xFFA855F7),
+                                            modifier = Modifier.weight(1f)
+                                        ) { selectedServiceOption = ServiceFunction.BACKUP_NVRAM }
+                                    }
                                 }
                             }
                         }
@@ -554,30 +682,44 @@ fun UnlockToolFlashScreen(
                             GroupBox(title = "1. Fastboot Mode Actions & Functions", icon = Icons.Default.Terminal) {
                                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        FastbootOptionCard("Get All Vars", "getvar:all", isSelected = selectedFastbootAction == "getvar:all" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                        FastbootOptionCard("Read Fastboot Info", "getvar:all", isSelected = (selectedFastbootAction == "getvar:all" || selectedFastbootAction == "read_info") && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "getvar:all"
                                             customFastbootCmd = ""
                                         }
-                                        FastbootOptionCard("Unlock BL", "flashing unlock", isSelected = selectedFastbootAction == "flashing unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                        FastbootOptionCard("Flashing Unlock", "flashing unlock", isSelected = selectedFastbootAction == "flashing unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "flashing unlock"
                                             customFastbootCmd = ""
                                         }
-                                        FastbootOptionCard("Lock BL", "flashing lock", isSelected = selectedFastbootAction == "flashing lock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "flashing lock"
+                                        FastbootOptionCard("OEM Unlock", "oem unlock", isSelected = selectedFastbootAction == "oem unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "oem unlock"
                                             customFastbootCmd = ""
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Lock Bootloader", "flashing lock", isSelected = selectedFastbootAction == "flashing lock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "flashing lock"
+                                            customFastbootCmd = ""
+                                        }
                                         FastbootOptionCard("Erase FRP", "erase:frp", isSelected = selectedFastbootAction == "erase:frp" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "erase:frp"
                                             customFastbootCmd = ""
                                         }
-                                        FastbootOptionCard("Wipe Userdata", "erase:userdata", isSelected = selectedFastbootAction == "erase:userdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                        FastbootOptionCard("Erase Config (FRP2)", "erase:config", isSelected = selectedFastbootAction == "erase:config" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "erase:config"
+                                            customFastbootCmd = ""
+                                        }
+                                    }
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Wipe Data (Reset)", "erase:userdata", isSelected = selectedFastbootAction == "erase:userdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "erase:userdata"
                                             customFastbootCmd = ""
                                         }
                                         FastbootOptionCard("Wipe Cache", "erase:cache", isSelected = selectedFastbootAction == "erase:cache" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "erase:cache"
+                                            customFastbootCmd = ""
+                                        }
+                                        FastbootOptionCard("Wipe Metadata", "erase:metadata", isSelected = selectedFastbootAction == "erase:metadata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "erase:metadata"
                                             customFastbootCmd = ""
                                         }
                                     }
@@ -610,15 +752,15 @@ fun UnlockToolFlashScreen(
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Reboot Bootloader", "reboot-bootloader", isSelected = selectedFastbootAction == "reboot-bootloader" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "reboot-bootloader"
+                                            customFastbootCmd = ""
+                                        }
                                         FastbootOptionCard("Reboot EDL (9008)", "oem edl", isSelected = selectedFastbootAction == "oem edl" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "oem edl"
                                             customFastbootCmd = ""
                                         }
-                                        FastbootOptionCard("Xiaomi Unlock", "oem unlock", isSelected = selectedFastbootAction == "oem unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "oem unlock"
-                                            customFastbootCmd = ""
-                                        }
-                                        FastbootOptionCard("Erase NVRAM", "erase:nvdata", isSelected = selectedFastbootAction == "erase:nvdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                        FastbootOptionCard("Erase NVRAM / Data", "erase:nvdata", isSelected = selectedFastbootAction == "erase:nvdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "erase:nvdata"
                                             customFastbootCmd = ""
                                         }
@@ -647,7 +789,7 @@ fun UnlockToolFlashScreen(
                                         ) {
                                             if (customFastbootCmd.isEmpty()) {
                                                 Text(
-                                                    text = "Type custom command (e.g. oem edl, getvar product)",
+                                                    text = "Type custom fastboot command (e.g. oem edl, getvar product, erase:userdata)",
                                                     fontSize = 10.sp,
                                                     fontFamily = FontFamily.Monospace,
                                                     color = Color(0xFF64748B)
@@ -676,8 +818,8 @@ fun UnlockToolFlashScreen(
                             GroupBox(title = "1. ADB Operations & Bypass Functions", icon = Icons.Default.Usb) {
                                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        FastbootOptionCard("Device Info", "getprop ro.product.model && getprop ro.product.brand && getprop ro.build.version.release && getprop ro.board.platform", isSelected = selectedAdbAction.startsWith("getprop ro.product.model") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "getprop ro.product.model && getprop ro.product.brand && getprop ro.build.version.release && getprop ro.board.platform"
+                                        FastbootOptionCard("Read Full Info", "read_info", isSelected = (selectedAdbAction == "read_info" || selectedAdbAction.startsWith("getprop")) && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "read_info"
                                             customAdbCmd = ""
                                         }
                                         FastbootOptionCard("Bypass FRP (Setup)", "settings put global setup_wizard_has_run 1 && settings put secure user_setup_complete 1 && settings put global device_provisioned 1 && am start -c android.intent.category.HOME -a android.intent.action.MAIN", isSelected = selectedAdbAction.contains("setup_wizard_has_run") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
@@ -833,7 +975,7 @@ fun UnlockToolFlashScreen(
                 partitionsCount = partitions.count { it.isSelectedForFlashing },
                 onExecute = {
                     if (progress.isRunning) {
-                        showStopDialog = true
+                        viewModel.cancelCurrentOperation()
                     } else {
                         when (currentDestination) {
                             AppNavDestination.FLASH -> viewModel.executeFlashOperation()
@@ -841,11 +983,19 @@ fun UnlockToolFlashScreen(
                             AppNavDestination.SERVICE, AppNavDestination.OTHER -> viewModel.executeServiceFunctionDirect(selectedServiceOption)
                             AppNavDestination.FASTBOOT -> {
                                 val cmd = if (customFastbootCmd.isNotBlank()) customFastbootCmd.trim() else selectedFastbootAction
-                                viewModel.runFastbootCommand(cmd, cmd)
+                                if (cmd == "getvar:all" || cmd == "read_info" || cmd.startsWith("getvar all")) {
+                                    viewModel.runFastbootReadAllVars()
+                                } else {
+                                    viewModel.runFastbootCommand(cmd, cmd)
+                                }
                             }
                             AppNavDestination.ADB -> {
                                 val cmd = if (customAdbCmd.isNotBlank()) customAdbCmd.trim() else selectedAdbAction
-                                viewModel.runAdbCommand(cmd, cmd)
+                                if (cmd == "read_info" || cmd.startsWith("getprop")) {
+                                    viewModel.runAdbReadInfo()
+                                } else {
+                                    viewModel.runAdbCommand(cmd, cmd)
+                                }
                             }
                         }
                     }
@@ -1116,7 +1266,8 @@ private fun SingleStartExecutionButton(
 private fun PartitionSelectionBox(
     partitions: List<PartitionEntry>,
     onToggleAll: (Boolean) -> Unit,
-    onTogglePartition: (Int, Boolean) -> Unit
+    onTogglePartition: (Int, Boolean) -> Unit,
+    onPickPartitionFile: ((Int) -> Unit)? = null
 ) {
     val allChecked = partitions.isNotEmpty() && partitions.all { it.isSelectedForFlashing }
 
@@ -1176,7 +1327,7 @@ private fun PartitionSelectionBox(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 120.dp)
+                    .heightIn(max = 135.dp)
                     .background(Color(0xFF090D16), RoundedCornerShape(4.dp))
                     .padding(2.dp)
             ) {
@@ -1201,21 +1352,37 @@ private fun PartitionSelectionBox(
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace,
                             color = if (part.isSelectedForFlashing) Color(0xFFF1F5F9) else Color(0xFF64748B),
-                            modifier = Modifier.weight(1.2f)
+                            modifier = Modifier.weight(1.1f)
                         )
                         Text(
                             text = part.linearStartAddrHex,
                             fontSize = 8.5.sp,
                             fontFamily = FontFamily.Monospace,
                             color = Color(0xFF06B6D4),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(0.9f)
                         )
                         Text(
-                            text = part.formattedSize,
-                            fontSize = 8.5.sp,
+                            text = if (part.fileName.isNotEmpty() && part.fileName != "NONE") part.fileName else part.formattedSize,
+                            fontSize = 8.sp,
                             fontFamily = FontFamily.Monospace,
-                            color = Color(0xFF94A3B8)
+                            color = if (part.boundFilePath.isNotEmpty()) Color(0xFF10B981) else Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1.2f)
                         )
+                        if (onPickPartitionFile != null) {
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = "Select File for ${part.partitionName}",
+                                tint = if (part.boundFilePath.isNotEmpty()) Color(0xFF10B981) else Color(0xFF64748B),
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .clickable { onPickPartitionFile(index) }
+                                    .padding(1.dp)
+                            )
+                        }
                     }
                     if (index < partitions.size - 1) {
                         HorizontalDivider(color = Color(0xFF1E293B).copy(alpha = 0.4f), thickness = 0.5.dp)
@@ -1449,6 +1616,44 @@ private fun BrandModelSelector(
             }
         }
     }
+
+    Spacer(modifier = Modifier.height(3.dp))
+    Surface(
+        shape = RoundedCornerShape(4.dp),
+        color = Color(0xFF090D16),
+        border = BorderStroke(1.dp, Color(0xFF1E293B)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(11.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "BROM Guide: ${selectedModel.bromInstruction}",
+                    fontSize = 9.sp,
+                    color = Color(0xFFCBD5E1),
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1
+                )
+            }
+            Surface(
+                shape = RoundedCornerShape(3.dp),
+                color = Color(0xFF0369A1)
+            ) {
+                Text(
+                    text = selectedModel.chipCode,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -1604,9 +1809,12 @@ private fun FastbootOptionCard(
 @Composable
 private fun ToolTopBar(
     currentDestination: AppNavDestination,
-    chipInfo: MtkChipInfo,
+    chipInfo: MtkChipInfo?,
     targetPhoneState: TargetPhoneState,
     detectedPortsCount: Int,
+    activeLockedMode: com.example.protocol.UsbDeviceMode?,
+    isModeIsolationEnabled: Boolean,
+    onToggleModeIsolation: (Boolean) -> Unit,
     onOpenDrawer: () -> Unit,
     onScanPorts: () -> Unit,
     onOpenPortSniffer: () -> Unit,
@@ -1649,6 +1857,29 @@ private fun ToolTopBar(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Mode Lock Indicator Pill if an action is currently locking a mode
+                if (activeLockedMode != null) {
+                    Surface(
+                        shape = RoundedCornerShape(3.dp),
+                        color = Color(0xFF7C2D12),
+                        border = BorderStroke(1.dp, Color(0xFFEA580C))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(Icons.Default.Lock, contentDescription = "Mode Locked", tint = Color(0xFFFDBA74), modifier = Modifier.size(9.dp))
+                            Text(
+                                text = "${activeLockedMode.label} LOCKED",
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFFEDD5)
+                            )
+                        }
+                    }
+                }
+
                 // Quick Scan Ports Button
                 Surface(
                     shape = RoundedCornerShape(3.dp),
@@ -1764,9 +1995,12 @@ private fun ToolTopBar(
 private fun PortSnifferDialog(
     detectedPorts: List<com.example.protocol.UsbPortInfo>,
     isAutoSnifferActive: Boolean,
+    activeLockedMode: com.example.protocol.UsbDeviceMode?,
+    isModeIsolationEnabled: Boolean,
     onDismiss: () -> Unit,
     onScanNow: () -> Unit,
     onToggleAutoSniffer: (Boolean) -> Unit,
+    onToggleModeIsolation: (Boolean) -> Unit,
     onConnectPort: (com.example.protocol.UsbPortInfo) -> Unit
 ) {
     AlertDialog(
@@ -1815,6 +2049,44 @@ private fun PortSnifferDialog(
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color(0xFF38BDF8),
                                 checkedTrackColor = Color(0xFF0369A1),
+                                uncheckedThumbColor = Color(0xFF64748B),
+                                uncheckedTrackColor = Color(0xFF1E293B)
+                            )
+                        )
+                    }
+                }
+
+                // Mode Isolation & Port Lock Toggle Card
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (isModeIsolationEnabled) Color(0xFF1E1B4B) else Color(0xFF0F172A),
+                    border = BorderStroke(1.dp, if (isModeIsolationEnabled) Color(0xFF6366F1) else Color(0xFF334155))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFFA5B4FC), modifier = Modifier.size(13.dp))
+                                Text("Mode Isolation & Port Lock", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF1F5F9))
+                            }
+                            Text(
+                                if (activeLockedMode != null) "ACTIVE LOCK: [${activeLockedMode.label}] (Other modes rejected)"
+                                else "Prevents unexpected USB mode interference during active operations",
+                                fontSize = 8.5.sp,
+                                color = if (activeLockedMode != null) Color(0xFFFDBA74) else Color(0xFF94A3B8)
+                            )
+                        }
+                        Switch(
+                            checked = isModeIsolationEnabled,
+                            onCheckedChange = onToggleModeIsolation,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFFA5B4FC),
+                                checkedTrackColor = Color(0xFF4F46E5),
                                 uncheckedThumbColor = Color(0xFF64748B),
                                 uncheckedTrackColor = Color(0xFF1E293B)
                             )

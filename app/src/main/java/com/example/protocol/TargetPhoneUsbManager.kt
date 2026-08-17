@@ -109,6 +109,7 @@ class TargetPhoneUsbManager(
     private val scope = CoroutineScope(Dispatchers.IO)
 
     var onDeviceAutoConnectedListener: ((TargetPhoneState.Connected) -> Unit)? = null
+    var onDeviceDisconnectedListener: (() -> Unit)? = null
     var permissionRequester: ((UsbDevice) -> Unit)? = null
 
     private val _phoneState = MutableStateFlow<TargetPhoneState>(TargetPhoneState.Disconnected)
@@ -119,6 +120,18 @@ class TargetPhoneUsbManager(
 
     private val _isAutoSnifferActive = MutableStateFlow(true)
     val isAutoSnifferActive: StateFlow<Boolean> = _isAutoSnifferActive.asStateFlow()
+
+    // Mode Isolation / Lock to prevent unwanted mode interruptions during active operations
+    private val _activeLockedMode = MutableStateFlow<UsbDeviceMode?>(null)
+    val activeLockedMode: StateFlow<UsbDeviceMode?> = _activeLockedMode.asStateFlow()
+
+    fun lockActiveMode(mode: UsbDeviceMode?) {
+        _activeLockedMode.value = mode
+    }
+
+    fun unlockActiveMode() {
+        _activeLockedMode.value = null
+    }
 
     private var snifferJob: kotlinx.coroutines.Job? = null
     private val isPermissionRequested = AtomicBoolean(false)
@@ -240,17 +253,24 @@ class TargetPhoneUsbManager(
             while (_isAutoSnifferActive.value) {
                 try {
                     val ports = scanAllAttachedPorts()
+                    val lockedMode = _activeLockedMode.value
                     if (!isConnected() && ports.isNotEmpty()) {
-                        val candidate = ports.firstOrNull { 
-                            it.vendorId == MTK_VID || 
-                            it.mode == UsbDeviceMode.BROM || 
-                            it.mode == UsbDeviceMode.PRELOADER || 
-                            it.mode == UsbDeviceMode.META ||
-                            it.mode == UsbDeviceMode.FASTBOOT || 
-                            it.mode == UsbDeviceMode.ADB ||
-                            it.mode == UsbDeviceMode.EDL_9008 ||
-                            it.mode == UsbDeviceMode.SPD_DIAG
-                        } ?: ports.firstOrNull()
+                        // If a specific mode is locked, ONLY connect to that mode and ignore all other ports
+                        val candidate = if (lockedMode != null) {
+                            ports.firstOrNull { it.mode == lockedMode }
+                        } else {
+                            ports.firstOrNull { 
+                                it.vendorId == MTK_VID || 
+                                it.mode == UsbDeviceMode.BROM || 
+                                it.mode == UsbDeviceMode.PRELOADER || 
+                                it.mode == UsbDeviceMode.META ||
+                                it.mode == UsbDeviceMode.FASTBOOT || 
+                                it.mode == UsbDeviceMode.ADB ||
+                                it.mode == UsbDeviceMode.EDL_9008 ||
+                                it.mode == UsbDeviceMode.SPD_DIAG
+                            } ?: ports.firstOrNull()
+                        }
+
                         if (candidate != null) {
                             val rawDevice = usbManager.deviceList.values.firstOrNull { it.vendorId == candidate.vendorId && it.productId == candidate.productId }
                             if (rawDevice != null) {
@@ -428,28 +448,40 @@ class TargetPhoneUsbManager(
             return@withContext false
         }
 
-        // Priority 1: BROM / MTK devices
-        var targetDevice: UsbDevice? = null
-        for ((_, device) in deviceList) {
-            if (device.vendorId == MTK_VID) {
-                targetDevice = device
-                break
-            }
-        }
+        val lockedMode = _activeLockedMode.value
 
-        // Priority 2: Fastboot or ADB or Other supported USB device
-        if (targetDevice == null) {
+        var targetDevice: UsbDevice? = null
+        if (lockedMode != null) {
+            // Only search for devices matching the locked mode
             for ((_, device) in deviceList) {
-                if (isMediaTekDevice(device) || detectDeviceMode(device) != UsbDeviceMode.UNKNOWN) {
+                if (detectDeviceMode(device) == lockedMode) {
                     targetDevice = device
                     break
                 }
             }
-        }
+        } else {
+            // Priority 1: BROM / MTK devices
+            for ((_, device) in deviceList) {
+                if (device.vendorId == MTK_VID) {
+                    targetDevice = device
+                    break
+                }
+            }
 
-        // Priority 3: Any attached USB device
-        if (targetDevice == null) {
-            targetDevice = deviceList.values.firstOrNull()
+            // Priority 2: Fastboot or ADB or Other supported USB device
+            if (targetDevice == null) {
+                for ((_, device) in deviceList) {
+                    if (isMediaTekDevice(device) || detectDeviceMode(device) != UsbDeviceMode.UNKNOWN) {
+                        targetDevice = device
+                        break
+                    }
+                }
+            }
+
+            // Priority 3: Any attached USB device
+            if (targetDevice == null) {
+                targetDevice = deviceList.values.firstOrNull()
+            }
         }
 
         if (targetDevice == null) {
@@ -642,7 +674,48 @@ class TargetPhoneUsbManager(
         return res >= 0
     }
 
+    private var activeAdbClient: AdbProtocolClient? = null
+    private var activeFastbootClient: FastbootProtocolClient? = null
+
+    fun getOrCreateAdbClient(): AdbProtocolClient? {
+        val dev = currentDevice ?: usbManager.deviceList.values.firstOrNull() ?: return null
+        val existing = activeAdbClient
+        if (existing != null && existing.isOpen()) {
+            return existing
+        }
+        val client = AdbProtocolClient(usbManager, dev)
+        activeAdbClient = client
+        return client
+    }
+
+    fun resetAdbClient() {
+        try {
+            activeAdbClient?.close()
+        } catch (_: Exception) {}
+        activeAdbClient = null
+    }
+
+    fun getOrCreateFastbootClient(): FastbootProtocolClient? {
+        val dev = currentDevice ?: usbManager.deviceList.values.firstOrNull() ?: return null
+        val existing = activeFastbootClient
+        if (existing != null) {
+            return existing
+        }
+        val client = FastbootProtocolClient(usbManager, dev, usbConnection, inEndpoint, outEndpoint)
+        activeFastbootClient = client
+        return client
+    }
+
+    fun resetFastbootClient() {
+        try {
+            activeFastbootClient?.close()
+        } catch (_: Exception) {}
+        activeFastbootClient = null
+    }
+
     fun disconnect() {
+        resetAdbClient()
+        resetFastbootClient()
         try {
             usbInterface?.let { usbConnection?.releaseInterface(it) }
             usbConnection?.close()
@@ -653,6 +726,9 @@ class TargetPhoneUsbManager(
         outEndpoint = null
         currentDevice = null
         _phoneState.value = TargetPhoneState.Disconnected
+        try {
+            onDeviceDisconnectedListener?.invoke()
+        } catch (_: Exception) {}
     }
 
     fun unregister() {
