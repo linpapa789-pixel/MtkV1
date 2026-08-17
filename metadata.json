@@ -1,0 +1,6 @@
+{
+  "name": "MTK BROM Bridge",
+  "description": "Standalone Direct Android USB OTG MediaTek BROM/Preloader flashing, partition manager, NVRAM backup/restore, and GSM service tool.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
