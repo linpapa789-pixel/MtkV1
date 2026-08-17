@@ -550,6 +550,15 @@ class TargetPhoneUsbManager(
                 fileDescriptor = rawFd
             )
             _phoneState.value = state
+
+            // CRITICAL: If target phone is in BROM mode, IMMEDIATELY blast handshake sync sequence
+            // so BootROM does not exit to preloader/charge mode while waiting for user interaction!
+            if (isBrom) {
+                try {
+                    blastBromHandshakeSync(8)
+                } catch (_: Exception) {}
+            }
+
             onDeviceAutoConnectedListener?.invoke(state)
             return@withContext true
         } catch (e: Exception) {
