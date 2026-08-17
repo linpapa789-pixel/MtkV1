@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.model.AppNavDestination
 import com.example.model.BackupMode
 import com.example.model.BridgeStatus
+import com.example.model.BromHandshakeMethod
 import com.example.model.FlashOptions
 import com.example.model.LogLevel
 import com.example.model.MtkBrand
@@ -90,6 +91,63 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _autoReboot = MutableStateFlow(true)
     val autoReboot: StateFlow<Boolean> = _autoReboot.asStateFlow()
+
+    // MediaTek BROM Handshake & Auth Skip Method (Method 1: Burst Sync, Method 2: Stream Blaster, Method 3: Preloader Crash, Method 4: Kamakiri Payload)
+    private val _selectedHandshakeMethod = MutableStateFlow(BromHandshakeMethod.METHOD_1_BURST_SYNC)
+    val selectedHandshakeMethod: StateFlow<BromHandshakeMethod> = _selectedHandshakeMethod.asStateFlow()
+
+    fun selectHandshakeMethod(method: BromHandshakeMethod) {
+        _selectedHandshakeMethod.value = method
+        addLog(TerminalLog(now(), "Handshake & Auth Method Selected: ${method.title} [Code: ${method.codeTag}]", LogLevel.CYAN))
+    }
+
+    fun testBromHandshake() {
+        if (_operationProgress.value.isRunning) {
+            cancelCurrentOperation()
+            return
+        }
+
+        activeJob?.cancel()
+        activeJob = viewModelScope.launch {
+            val method = _selectedHandshakeMethod.value
+            val isSim = _isDryRun.value
+
+            if (_isModeIsolationEnabled.value) {
+                targetPhoneUsb.lockActiveMode(com.example.protocol.UsbDeviceMode.BROM)
+            }
+
+            _operationProgress.value = OperationProgress(
+                isRunning = true,
+                title = "Testing BROM Handshake",
+                detail = "Executing ${method.shortLabel}...",
+                percentage = 0f
+            )
+
+            com.example.audio.ToolSoundManager.playOperationStart()
+            try {
+                protocolEngine.withStableConnection {
+                    addLog(TerminalLog(now(), "=== [TEST BROM HANDSHAKE] Method: ${method.title} ===", LogLevel.INFO))
+                    val ok = protocolEngine.performHandshake(method, isSim)
+                    if (ok) {
+                        addLog(TerminalLog(now(), "BROM Handshake [${method.shortLabel}] Verification: SUCCESS (Port Synchronized)", LogLevel.SUCCESS))
+                        com.example.audio.ToolSoundManager.playOperationDone()
+                    } else {
+                        addLog(TerminalLog(now(), "BROM Handshake [${method.shortLabel}] Verification: FAILED (Try Method 2 or 3)", LogLevel.ERROR))
+                        com.example.audio.ToolSoundManager.playOperationStop()
+                    }
+                    Result.success(ok)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                com.example.audio.ToolSoundManager.playOperationStop()
+            } catch (e: Exception) {
+                addLog(TerminalLog(now(), "Handshake Test Error: ${e.message}", LogLevel.ERROR))
+                com.example.audio.ToolSoundManager.playOperationStop()
+            } finally {
+                _operationProgress.value = OperationProgress(isRunning = false, percentage = 0f)
+                targetPhoneUsb.unlockActiveMode()
+            }
+        }
+    }
 
     private val _backupLocation = MutableStateFlow(storageManager.getBackupDirectory().absolutePath)
     val backupLocation: StateFlow<String> = _backupLocation.asStateFlow()
@@ -644,7 +702,7 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 protocolEngine.withStableConnection {
                     when (func) {
                         ServiceFunction.READ_INFO -> {
-                            val res = protocolEngine.executeBromHandshake(isSim)
+                            val res = protocolEngine.executeBromHandshake(isSim, _selectedHandshakeMethod.value)
                             if (res.isSuccess) {
                                 val info = res.getOrNull()!!
                                 _chipInfo.value = info

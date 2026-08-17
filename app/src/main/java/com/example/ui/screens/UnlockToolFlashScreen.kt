@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
@@ -98,6 +99,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.AppNavDestination
 import com.example.model.BackupMode
+import com.example.model.BromHandshakeMethod
 import com.example.model.LogLevel
 import com.example.model.MtkBrand
 import com.example.model.MtkChipInfo
@@ -140,6 +142,7 @@ fun UnlockToolFlashScreen(
     val activeLockedMode by viewModel.activeLockedMode.collectAsState()
     val isModeIsolationEnabled by viewModel.isModeIsolationEnabled.collectAsState()
     val backupLocation by viewModel.backupLocation.collectAsState()
+    val selectedHandshakeMethod by viewModel.selectedHandshakeMethod.collectAsState()
 
     // Service function selection state
     var selectedServiceOption by remember { mutableStateOf(ServiceFunction.ERASE_FRP) }
@@ -559,8 +562,17 @@ fun UnlockToolFlashScreen(
                                 )
                             }
 
-                            // GROUP BOX 2: GSM SERVICE OPERATIONS
-                            GroupBox(title = "2. GSM Service Operations", icon = Icons.Default.LockOpen) {
+                            // GROUP BOX 2: BROM HANDSHAKE & AUTH SKIP METHOD (Method 1/2/3/4)
+                            GroupBox(title = "2. BROM Handshake & Auth Skip Method", icon = Icons.Default.Bolt) {
+                                BromHandshakeMethodSelector(
+                                    selectedMethod = selectedHandshakeMethod,
+                                    onSelectMethod = { viewModel.selectHandshakeMethod(it) },
+                                    onTestHandshake = { viewModel.testBromHandshake() }
+                                )
+                            }
+
+                            // GROUP BOX 3: GSM SERVICE OPERATIONS
+                            GroupBox(title = "3. GSM Service Operations", icon = Icons.Default.LockOpen) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2307,6 +2319,146 @@ private fun GuideBrandItem(
             Text(brand, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
             Spacer(modifier = Modifier.height(2.dp))
             Text(guide, fontSize = 8.5.sp, color = Color(0xFFCBD5E1), lineHeight = 12.sp)
+        }
+    }
+}
+
+@Composable
+fun BromHandshakeMethodSelector(
+    selectedMethod: BromHandshakeMethod,
+    onSelectMethod: (BromHandshakeMethod) -> Unit,
+    onTestHandshake: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = Color(0xFF0B1120),
+        border = BorderStroke(1.dp, Color(0xFF1E293B)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Bolt,
+                        contentDescription = null,
+                        tint = Color(0xFFF59E0B),
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "Handshake Engine Selection",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFF1F5F9)
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(3.dp),
+                    color = Color(0xFF1E1B4B),
+                    border = BorderStroke(1.dp, Color(0xFF6366F1))
+                ) {
+                    Text(
+                        text = selectedMethod.codeTag,
+                        fontSize = 8.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFA5B4FC),
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Scroll box / Horizontal cards for Method 1, 2, 3, 4
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                BromHandshakeMethod.values().forEach { method ->
+                    val isSelected = method == selectedMethod
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = if (isSelected) Color(0xFF1E293B) else Color(0xFF0F172A),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSelected) Color(0xFF38BDF8) else Color(0xFF334155)
+                        ),
+                        modifier = Modifier
+                            .width(180.dp)
+                            .clickable { onSelectMethod(method) }
+                    ) {
+                        Column(modifier = Modifier.padding(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = method.shortLabel,
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) Color(0xFF38BDF8) else Color(0xFFE2E8F0)
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckBox,
+                                        contentDescription = null,
+                                        tint = Color(0xFF38BDF8),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = method.description,
+                                fontSize = 8.sp,
+                                color = Color(0xFF94A3B8),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                lineHeight = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Quick Test Handshake & Description Footer
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Selected: ${selectedMethod.title}",
+                    fontSize = 8.5.sp,
+                    color = Color(0xFF94A3B8),
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Button(
+                    onClick = onTestHandshake,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("Test Handshake", fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }

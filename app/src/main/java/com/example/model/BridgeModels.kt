@@ -68,6 +68,38 @@ enum class BackupMode(val title: String, val shortLabel: String, val description
     CUSTOM_PARTITIONS("Custom Partition Dump", "Custom GPT", "Dump only the user-checked partitions in the GPT partition table")
 }
 
+enum class BromHandshakeMethod(
+    val title: String,
+    val shortLabel: String,
+    val description: String,
+    val codeTag: String
+) {
+    METHOD_1_BURST_SYNC(
+        "Method 1: Fast Burst Sync (mtkclient standard)",
+        "Method 1 (Burst Sync)",
+        "Drains buffer, sends fast 0xA0 pulses until 0x5F locked, then 4-byte echo sequence",
+        "0xA0_BURST_SYNC"
+    ),
+    METHOD_2_STREAM_BLASTER(
+        "Method 2: Multi-Pulse Stream Blaster (Aggressive OTG)",
+        "Method 2 (Stream Blaster)",
+        "Continuously blasts full [0xA0, 0x0A, 0x50, 0x05] stream for fast plug-in detection",
+        "4BYTE_STREAM_BLAST"
+    ),
+    METHOD_3_PRELOADER_CRASH(
+        "Method 3: Preloader Crash / WDT Kick to BROM",
+        "Method 3 (Preloader Crash)",
+        "Sends Watchdog reset control request & Preloader escape sequence to force BootROM",
+        "WDT_PRELOADER_CRASH"
+    ),
+    METHOD_4_KAMAKIRI_PAYLOAD(
+        "Method 4: Kamakiri / Amonet SLA-DAA Payload Bypass",
+        "Method 4 (Kamakiri Bypass)",
+        "Executes USB control exploit & patches SEC_CFG registers for auth-disabled operations",
+        "KAMAKIRI_SLA_DAA_BYPASS"
+    )
+}
+
 data class FlashOptions(
     val readNvData: Boolean = true,
     val autoReboot: Boolean = true,
