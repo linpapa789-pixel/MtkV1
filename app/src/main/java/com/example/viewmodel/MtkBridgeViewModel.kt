@@ -759,9 +759,14 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                 return@launch
             }
 
-            val connected = client.connect()
+            addLog(TerminalLog(now(), "[*] ADB Handshake: Sending RSA Public Key to target device...", LogLevel.INFO))
+            val connected = client.connect(getApplication()) {
+                addLog(TerminalLog(now(), "[>>>] Authorization Prompt sent to phone! Please tap [ALLOW / OK] on target phone screen...", LogLevel.WARNING))
+            }
             if (!connected) {
-                addLog(TerminalLog(now(), "[!] ADB Warning: ADB Handshake not accepted. Check phone screen for Authorization prompt.", LogLevel.WARNING))
+                addLog(TerminalLog(now(), "[!] ADB Warning: Device not authorized yet or timeout waiting for user authorization on phone screen.", LogLevel.WARNING))
+            } else {
+                addLog(TerminalLog(now(), "[+] ADB Authenticated successfully!", LogLevel.SUCCESS))
             }
 
             val output = client.executeShell(command)
