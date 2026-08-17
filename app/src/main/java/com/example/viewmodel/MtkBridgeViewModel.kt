@@ -356,8 +356,24 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun resetActionState(destination: AppNavDestination? = null) {
+        // Reset partition selection to safe defaults
+        if (_partitions.value.isNotEmpty()) {
+            _selectedPartitionIndex.value = 0
+        }
+        // Match default service function to the destination
+        when (destination) {
+            AppNavDestination.SERVICE -> _selectedServiceFunction.value = ServiceFunction.READ_INFO
+            AppNavDestination.FLASH -> _selectedServiceFunction.value = ServiceFunction.BATCH_FLASH
+            AppNavDestination.BACKUP -> _selectedServiceFunction.value = ServiceFunction.DUMP_ALL_PARTITIONS
+            AppNavDestination.OTHER -> _selectedServiceFunction.value = ServiceFunction.BYPASS_AUTH
+            else -> {}
+        }
+    }
+
     fun navigateTo(destination: AppNavDestination) {
         _currentDestination.value = destination
+        resetActionState(destination)
         addLog(TerminalLog(now(), "Navigated to: ${destination.title}", LogLevel.INFO))
     }
 
@@ -427,17 +443,19 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             com.example.audio.ToolSoundManager.playOperationStart()
             addLog(TerminalLog(now(), "Starting Batch Flash for '${_selectedBrand.value.brandName} -> ${_selectedModel.value.modelName}'...", LogLevel.INFO))
             try {
-                val res = protocolEngine.batchFlash(
-                    chipPlatform = chip,
-                    partitions = parts,
-                    isSimulation = isSim,
-                    autoNvBackup = opts.readNvData,
-                    autoReboot = opts.autoReboot,
-                    flashAfterBlUnlock = opts.flashAfterBlUnlock,
-                    daDlChecksum = opts.daDlChecksum,
-                    autoSignFlash = opts.autoSignFlash,
-                    formatAllDownload = opts.formatAllDownload
-                )
+                val res = protocolEngine.withStableConnection {
+                    protocolEngine.batchFlash(
+                        chipPlatform = chip,
+                        partitions = parts,
+                        isSimulation = isSim,
+                        autoNvBackup = opts.readNvData,
+                        autoReboot = opts.autoReboot,
+                        flashAfterBlUnlock = opts.flashAfterBlUnlock,
+                        daDlChecksum = opts.daDlChecksum,
+                        autoSignFlash = opts.autoSignFlash,
+                        formatAllDownload = opts.formatAllDownload
+                    )
+                }
                 if (res.isSuccess) {
                     com.example.audio.ToolSoundManager.playOperationDone()
                 } else {
@@ -479,23 +497,25 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
             addLog(TerminalLog(now(), "Initiating Backup Session: ${mode.title} for ${_selectedBrand.value.brandName} [${_selectedModel.value.modelName}]", LogLevel.INFO))
 
             try {
-                when (mode) {
-                    BackupMode.FULL_FIRMWARE -> {
-                        protocolEngine.dumpAllPartitions(parts, isSim)
+                protocolEngine.withStableConnection {
+                    when (mode) {
+                        BackupMode.FULL_FIRMWARE -> {
+                            protocolEngine.dumpAllPartitions(parts, isSim)
+                        }
+                        BackupMode.STABLE_FIRMWARE -> {
+                            protocolEngine.dumpStablePartitions(parts, isSim)
+                        }
+                        BackupMode.NV_DATA -> {
+                            protocolEngine.backupNvram(chip, parts, isSim)
+                        }
+                        BackupMode.CUSTOM_PARTITIONS -> {
+                            protocolEngine.dumpCustomPartitions(parts, isSim)
+                        }
                     }
-                    BackupMode.STABLE_FIRMWARE -> {
-                        protocolEngine.dumpStablePartitions(parts, isSim)
+                    if (autoReboot) {
+                        protocolEngine.rebootDevice("Android System", isSim)
                     }
-                    BackupMode.NV_DATA -> {
-                        protocolEngine.backupNvram(chip, parts, isSim)
-                    }
-                    BackupMode.CUSTOM_PARTITIONS -> {
-                        protocolEngine.dumpCustomPartitions(parts, isSim)
-                    }
-                }
-
-                if (autoReboot) {
-                    protocolEngine.rebootDevice("Android System", isSim)
+                    Result.success(true)
                 }
                 com.example.audio.ToolSoundManager.playOperationDone()
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -570,93 +590,96 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
 
             com.example.audio.ToolSoundManager.playOperationStart()
             try {
-                when (func) {
-                    ServiceFunction.READ_INFO -> {
-                        runBromHandshake()
-                    }
-                    ServiceFunction.WRITE_PARTITION -> {
-                        val part = parts.getOrNull(_selectedPartitionIndex.value)
-                        if (part != null) {
-                            protocolEngine.writePartition(part, null, isSim, autoNvBackup, autoReboot)
-                        } else {
-                            addLog(TerminalLog(now(), "Please select a valid partition to write.", LogLevel.ERROR))
+                protocolEngine.withStableConnection {
+                    when (func) {
+                        ServiceFunction.READ_INFO -> {
+                            runBromHandshake()
+                        }
+                        ServiceFunction.WRITE_PARTITION -> {
+                            val part = parts.getOrNull(_selectedPartitionIndex.value)
+                            if (part != null) {
+                                protocolEngine.writePartition(part, null, isSim, autoNvBackup, autoReboot)
+                            } else {
+                                addLog(TerminalLog(now(), "Please select a valid partition to write.", LogLevel.ERROR))
+                            }
+                        }
+                        ServiceFunction.BATCH_FLASH -> {
+                            executeFlashOperation()
+                        }
+                        ServiceFunction.READ_PARTITION -> {
+                            val part = parts.getOrNull(_selectedPartitionIndex.value)
+                            if (part != null) {
+                                protocolEngine.readPartition(part, isSim)
+                            } else {
+                                addLog(TerminalLog(now(), "Please select a valid partition to read.", LogLevel.ERROR))
+                            }
+                        }
+                        ServiceFunction.DUMP_ALL_PARTITIONS -> {
+                            protocolEngine.dumpAllPartitions(parts, isSim)
+                        }
+                        ServiceFunction.DUMP_STABLE_PARTITIONS -> {
+                            protocolEngine.dumpStablePartitions(parts, isSim)
+                        }
+                        ServiceFunction.READ_PRELOADER -> {
+                            protocolEngine.readPreloader(isSim)
+                        }
+                        ServiceFunction.READ_GPT_SCATTER -> {
+                            protocolEngine.readGptAndGenerateScatter(chip, parts, isSim)
+                        }
+                        ServiceFunction.READ_RPMB -> {
+                            protocolEngine.readRpmb(isSim)
+                        }
+                        ServiceFunction.BACKUP_NVRAM -> {
+                            protocolEngine.backupNvram(chip, parts, isSim)
+                        }
+                        ServiceFunction.RESTORE_NVRAM -> {
+                            addLog(TerminalLog(now(), "Restoring saved NV calibration archive...", LogLevel.INFO))
+                            val nvPart = parts.find { it.partitionName.lowercase() == "nvdata" } ?: parts.getOrNull(2)
+                            if (nvPart != null) {
+                                protocolEngine.writePartition(nvPart, null, isSim, autoNvBackup = false, autoReboot = autoReboot)
+                            }
+                        }
+                        ServiceFunction.BYPASS_AUTH -> {
+                            protocolEngine.bypassAuth(isSim)
+                        }
+                        ServiceFunction.UNLOCK_BOOTLOADER -> {
+                            protocolEngine.unlockBootloader(isSim, autoReboot)
+                        }
+                        ServiceFunction.LOCK_BOOTLOADER -> {
+                            protocolEngine.lockBootloader(isSim, autoReboot)
+                        }
+                        ServiceFunction.ERASE_FRP -> {
+                            protocolEngine.eraseFrp(chip, parts, isSim, autoNvBackup, autoReboot)
+                        }
+                        ServiceFunction.FACTORY_RESET -> {
+                            protocolEngine.factoryReset(chip, parts, isSim, autoNvBackup, autoReboot)
+                        }
+                        ServiceFunction.DISABLE_MI_ACCOUNT -> {
+                            protocolEngine.disableMiAccount(chip, parts, isSim, autoNvBackup, autoReboot)
+                        }
+                        ServiceFunction.MEMORY_TEST -> {
+                            protocolEngine.runMemoryTest(isSim)
+                        }
+                        ServiceFunction.FORMAT_PARTITION -> {
+                            val part = parts.getOrNull(_selectedPartitionIndex.value)
+                            if (part != null) {
+                                protocolEngine.formatPartition(chip, part, parts, isSim, autoNvBackup, autoReboot)
+                            }
+                        }
+                        ServiceFunction.CRASH_TO_BROM -> {
+                            protocolEngine.crashToBrom(isSim)
+                        }
+                        ServiceFunction.REBOOT_SYSTEM -> {
+                            protocolEngine.rebootDevice("Android System", isSim)
+                        }
+                        ServiceFunction.REBOOT_FASTBOOT -> {
+                            protocolEngine.rebootDevice("Fastboot Mode", isSim)
+                        }
+                        ServiceFunction.REBOOT_RECOVERY -> {
+                            protocolEngine.rebootDevice("Recovery Mode", isSim)
                         }
                     }
-                    ServiceFunction.BATCH_FLASH -> {
-                        executeFlashOperation()
-                    }
-                    ServiceFunction.READ_PARTITION -> {
-                        val part = parts.getOrNull(_selectedPartitionIndex.value)
-                        if (part != null) {
-                            protocolEngine.readPartition(part, isSim)
-                        } else {
-                            addLog(TerminalLog(now(), "Please select a valid partition to read.", LogLevel.ERROR))
-                        }
-                    }
-                    ServiceFunction.DUMP_ALL_PARTITIONS -> {
-                        protocolEngine.dumpAllPartitions(parts, isSim)
-                    }
-                    ServiceFunction.DUMP_STABLE_PARTITIONS -> {
-                        protocolEngine.dumpStablePartitions(parts, isSim)
-                    }
-                    ServiceFunction.READ_PRELOADER -> {
-                        protocolEngine.readPreloader(isSim)
-                    }
-                    ServiceFunction.READ_GPT_SCATTER -> {
-                        protocolEngine.readGptAndGenerateScatter(chip, parts, isSim)
-                    }
-                    ServiceFunction.READ_RPMB -> {
-                        protocolEngine.readRpmb(isSim)
-                    }
-                    ServiceFunction.BACKUP_NVRAM -> {
-                        protocolEngine.backupNvram(chip, parts, isSim)
-                    }
-                    ServiceFunction.RESTORE_NVRAM -> {
-                        addLog(TerminalLog(now(), "Restoring saved NV calibration archive...", LogLevel.INFO))
-                        val nvPart = parts.find { it.partitionName.lowercase() == "nvdata" } ?: parts.getOrNull(2)
-                        if (nvPart != null) {
-                            protocolEngine.writePartition(nvPart, null, isSim, autoNvBackup = false, autoReboot = autoReboot)
-                        }
-                    }
-                    ServiceFunction.BYPASS_AUTH -> {
-                        protocolEngine.bypassAuth(isSim)
-                    }
-                    ServiceFunction.UNLOCK_BOOTLOADER -> {
-                        protocolEngine.unlockBootloader(isSim, autoReboot)
-                    }
-                    ServiceFunction.LOCK_BOOTLOADER -> {
-                        protocolEngine.lockBootloader(isSim, autoReboot)
-                    }
-                    ServiceFunction.ERASE_FRP -> {
-                        protocolEngine.eraseFrp(chip, parts, isSim, autoNvBackup, autoReboot)
-                    }
-                    ServiceFunction.FACTORY_RESET -> {
-                        protocolEngine.factoryReset(chip, parts, isSim, autoNvBackup, autoReboot)
-                    }
-                    ServiceFunction.DISABLE_MI_ACCOUNT -> {
-                        protocolEngine.disableMiAccount(chip, parts, isSim, autoNvBackup, autoReboot)
-                    }
-                    ServiceFunction.MEMORY_TEST -> {
-                        protocolEngine.runMemoryTest(isSim)
-                    }
-                    ServiceFunction.FORMAT_PARTITION -> {
-                        val part = parts.getOrNull(_selectedPartitionIndex.value)
-                        if (part != null) {
-                            protocolEngine.formatPartition(chip, part, parts, isSim, autoNvBackup, autoReboot)
-                        }
-                    }
-                    ServiceFunction.CRASH_TO_BROM -> {
-                        protocolEngine.crashToBrom(isSim)
-                    }
-                    ServiceFunction.REBOOT_SYSTEM -> {
-                        protocolEngine.rebootDevice("Android System", isSim)
-                    }
-                    ServiceFunction.REBOOT_FASTBOOT -> {
-                        protocolEngine.rebootDevice("Fastboot Mode", isSim)
-                    }
-                    ServiceFunction.REBOOT_RECOVERY -> {
-                        protocolEngine.rebootDevice("Recovery Mode", isSim)
-                    }
+                    Result.success(true)
                 }
                 com.example.audio.ToolSoundManager.playOperationDone()
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -863,7 +886,12 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
                     command.contains("reboot") -> "Rebooting device ... OKAY"
                     else -> "OKAY [ 0.020s ]"
                 }
-                addLog(TerminalLog(now(), "[Fastboot Output]\n$mockResult", LogLevel.SUCCESS))
+                addLog(TerminalLog(now(), "[FASTBOOT OUTPUT]", LogLevel.SUCCESS))
+                mockResult.lines().forEach { line ->
+                    if (line.isNotBlank()) {
+                        addLog(TerminalLog(now(), "  $line", LogLevel.RAW))
+                    }
+                }
                 onComplete?.invoke(mockResult)
                 _isFastbootBusy.value = false
                 return@launch
@@ -888,7 +916,12 @@ class MtkBridgeViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (res.isSuccess) {
                 val output = res.info.ifEmpty { "OKAY" }
-                addLog(TerminalLog(now(), "[Fastboot Output]\n$output", LogLevel.SUCCESS))
+                addLog(TerminalLog(now(), "[FASTBOOT OUTPUT]", LogLevel.SUCCESS))
+                output.lines().forEach { line ->
+                    if (line.isNotBlank()) {
+                        addLog(TerminalLog(now(), "  $line", LogLevel.RAW))
+                    }
+                }
                 onComplete?.invoke(output)
             } else {
                 val err = res.error.ifEmpty { res.info.ifEmpty { "Command failed" } }

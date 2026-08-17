@@ -68,12 +68,38 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        viewModel.targetPhoneUsb.permissionRequester = { device ->
+            val usbManager = getSystemService(USB_SERVICE) as UsbManager
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                android.app.PendingIntent.FLAG_MUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val intent = Intent(com.example.protocol.TargetPhoneUsbManager.ACTION_USB_PHONE_PERMISSION).apply {
+                setPackage(packageName)
+            }
+            val permissionIntent = android.app.PendingIntent.getBroadcast(this, 0, intent, flags)
+            usbManager.requestPermission(device, permissionIntent)
+        }
+
         handleUsbDeviceIntent(intent)
         setContent {
             MyApplicationTheme {
                 MtkMainApp(viewModel = viewModel)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // On returning from any USB permission prompt or screen focus change, scan ports safely
+        viewModel.targetPhoneUsb.onActivityResume()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        viewModel.targetPhoneUsb.permissionRequester = null
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -93,7 +119,7 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
             if (device != null) {
-                lifecycleScope.launchWhenStarted {
+                lifecycleScope.launch {
                     viewModel.targetPhoneUsb.connectDevice(device)
                 }
             }

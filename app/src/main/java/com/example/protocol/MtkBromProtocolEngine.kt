@@ -47,6 +47,48 @@ class MtkBromProtocolEngine(
     }
 
     /**
+     * Validates that connected target USB device is in the expected mode (BROM/Preloader).
+     * Rejects mismatched modes like Fastboot or ADB with explicit user guidance.
+     */
+    fun validateTargetMode(expectedMode: UsbDeviceMode = UsbDeviceMode.BROM, isSimulation: Boolean = false): Boolean {
+        if (isSimulation) return true
+        val state = targetPhoneUsb.phoneState.value
+        if (state is TargetPhoneState.Connected) {
+            if (state.mode == UsbDeviceMode.FASTBOOT) {
+                log("[-] ERROR: Device is in FASTBOOT mode! Please power off, hold [Vol Up + Vol Down], and reinsert USB cable for MediaTek BROM mode.", LogLevel.ERROR)
+                return false
+            }
+            if (state.mode == UsbDeviceMode.ADB) {
+                log("[-] ERROR: Device is in ADB / Android OS mode! Please power off, hold [Vol Up + Vol Down], and reinsert USB cable for MediaTek BROM mode.", LogLevel.ERROR)
+                return false
+            }
+            if (expectedMode == UsbDeviceMode.BROM && state.mode != UsbDeviceMode.BROM && state.mode != UsbDeviceMode.PRELOADER && state.mode != UsbDeviceMode.META) {
+                log("[!] Notice: Connected port mode is ${state.mode.label} (${state.vidPid}). Expected BROM / Preloader.", LogLevel.WARNING)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Helper to wrap critical operations (flash, partition dump, wipe, reboot)
+     * by safely pausing the background auto-sniffer, executing the action, and resuming sniffer.
+     */
+    suspend fun <T> withStableConnection(action: suspend () -> Result<T>): Result<T> {
+        val wasSnifferActive = targetPhoneUsb.isAutoSnifferActive.value
+        if (wasSnifferActive) {
+            targetPhoneUsb.stopContinuousAutoSniffer()
+        }
+        return try {
+            action()
+        } finally {
+            if (wasSnifferActive) {
+                delay(1200) // Brief stabilization delay before resuming sniffing loop
+                targetPhoneUsb.startContinuousAutoSniffer()
+            }
+        }
+    }
+
+    /**
      * Actively waits and sniffs for target MTK phone to be plugged in while holding Vol keys.
      */
     private suspend fun ensureTargetConnected(isSimulation: Boolean, timeoutSec: Int = 30): Boolean {
@@ -175,6 +217,10 @@ class MtkBromProtocolEngine(
                 bromState = "BROM_READY"
             )
             return Result.success(info)
+        }
+
+        if (!validateTargetMode(UsbDeviceMode.BROM, isSimulation)) {
+            return Result.failure(IllegalStateException("Target phone is not in BROM mode"))
         }
 
         try {

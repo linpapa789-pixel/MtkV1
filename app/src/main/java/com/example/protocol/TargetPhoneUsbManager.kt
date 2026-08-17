@@ -109,6 +109,7 @@ class TargetPhoneUsbManager(
     private val scope = CoroutineScope(Dispatchers.IO)
 
     var onDeviceAutoConnectedListener: ((TargetPhoneState.Connected) -> Unit)? = null
+    var permissionRequester: ((UsbDevice) -> Unit)? = null
 
     private val _phoneState = MutableStateFlow<TargetPhoneState>(TargetPhoneState.Disconnected)
     val phoneState: StateFlow<TargetPhoneState> = _phoneState.asStateFlow()
@@ -132,37 +133,43 @@ class TargetPhoneUsbManager(
                     isPermissionRequested.set(false)
                     requestedDeviceKey = null
 
-                    val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
-                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                    if (granted && device != null) {
-                        scope.launch {
-                            connectDevice(device)
+                    try {
+                        val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                         }
-                    } else {
-                        _phoneState.value = TargetPhoneState.Error("USB Permission was not granted.")
+                        val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                        if (granted && device != null) {
+                            scope.launch {
+                                connectDevice(device)
+                            }
+                        } else if (!granted) {
+                            _phoneState.value = TargetPhoneState.Error("USB Permission was not granted.")
+                        }
+                    } catch (e: Exception) {
+                        _phoneState.value = TargetPhoneState.Error("Permission handling error: ${e.message}")
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
-                    if (device != null) {
-                        scope.launch {
-                            if (usbManager.hasPermission(device)) {
-                                connectDevice(device)
-                            } else {
-                                requestDevicePermission(device)
+                    try {
+                        val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                        }
+                        if (device != null) {
+                            scope.launch {
+                                if (usbManager.hasPermission(device)) {
+                                    connectDevice(device)
+                                } else {
+                                    requestDevicePermission(device)
+                                }
                             }
                         }
-                    }
+                    } catch (_: Exception) {}
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     isPermissionRequested.set(false)
@@ -179,12 +186,22 @@ class TargetPhoneUsbManager(
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            context.registerReceiver(usbReceiver, filter)
-        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(usbReceiver, filter)
+            }
+        } catch (_: Exception) {}
         startContinuousAutoSniffer()
+    }
+
+    fun onActivityResume() {
+        scope.launch {
+            try {
+                scanAndConnect()
+            } catch (_: Exception) {}
+        }
     }
 
     fun scanAllAttachedPorts(): List<UsbPortInfo> {
@@ -377,17 +394,29 @@ class TargetPhoneUsbManager(
             vidPid = vidPidStr
         )
 
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
+        val requester = permissionRequester
+        if (requester != null) {
+            try {
+                requester(device)
+                return
+            } catch (_: Exception) {}
         }
-        val permissionIntent = PendingIntent.getBroadcast(
-            context, 0,
-            Intent(ACTION_USB_PHONE_PERMISSION).setPackage(context.packageName),
-            flags
-        )
-        usbManager.requestPermission(device, permissionIntent)
+
+        try {
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val permissionIntent = PendingIntent.getBroadcast(
+                context, 0,
+                Intent(ACTION_USB_PHONE_PERMISSION).setPackage(context.packageName),
+                flags
+            )
+            usbManager.requestPermission(device, permissionIntent)
+        } catch (e: Exception) {
+            _phoneState.value = TargetPhoneState.Error("Failed to trigger USB permission dialog: ${e.message}")
+        }
     }
 
     suspend fun scanAndConnect(): Boolean = withContext(Dispatchers.IO) {
