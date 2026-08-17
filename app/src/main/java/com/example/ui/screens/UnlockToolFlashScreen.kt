@@ -551,7 +551,7 @@ fun UnlockToolFlashScreen(
 
                         AppNavDestination.FASTBOOT -> {
                             // GROUP BOX 1: FASTBOOT PRE-CONFIGURED COMMANDS (Fastboot Tab Only)
-                            GroupBox(title = "1. Fastboot Mode Actions", icon = Icons.Default.Terminal) {
+                            GroupBox(title = "1. Fastboot Mode Actions & Functions", icon = Icons.Default.Terminal) {
                                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Get All Vars", "getvar:all", isSelected = selectedFastbootAction == "getvar:all" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
@@ -576,12 +576,30 @@ fun UnlockToolFlashScreen(
                                             selectedFastbootAction = "erase:userdata"
                                             customFastbootCmd = ""
                                         }
-                                        FastbootOptionCard("Reboot System", "reboot", isSelected = selectedFastbootAction == "reboot" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedFastbootAction = "reboot"
+                                        FastbootOptionCard("Wipe Cache", "erase:cache", isSelected = selectedFastbootAction == "erase:cache" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "erase:cache"
                                             customFastbootCmd = ""
                                         }
                                     }
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Active Slot A", "set_active a", isSelected = selectedFastbootAction == "set_active a" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "set_active a"
+                                            customFastbootCmd = ""
+                                        }
+                                        FastbootOptionCard("Active Slot B", "set_active b", isSelected = selectedFastbootAction == "set_active b" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "set_active b"
+                                            customFastbootCmd = ""
+                                        }
+                                        FastbootOptionCard("Current Slot", "getvar:current-slot", isSelected = selectedFastbootAction == "getvar:current-slot" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "getvar:current-slot"
+                                            customFastbootCmd = ""
+                                        }
+                                    }
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Reboot System", "reboot", isSelected = selectedFastbootAction == "reboot" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "reboot"
+                                            customFastbootCmd = ""
+                                        }
                                         FastbootOptionCard("Reboot Recovery", "reboot-recovery", isSelected = selectedFastbootAction == "reboot-recovery" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "reboot-recovery"
                                             customFastbootCmd = ""
@@ -590,8 +608,18 @@ fun UnlockToolFlashScreen(
                                             selectedFastbootAction = "reboot-fastboot"
                                             customFastbootCmd = ""
                                         }
+                                    }
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Reboot EDL (9008)", "oem edl", isSelected = selectedFastbootAction == "oem edl" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedFastbootAction = "oem edl"
+                                            customFastbootCmd = ""
+                                        }
+                                        FastbootOptionCard("Xiaomi Unlock", "oem unlock", isSelected = selectedFastbootAction == "oem unlock" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "oem unlock"
+                                            customFastbootCmd = ""
+                                        }
+                                        FastbootOptionCard("Erase NVRAM", "erase:nvdata", isSelected = selectedFastbootAction == "erase:nvdata" && customFastbootCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedFastbootAction = "erase:nvdata"
                                             customFastbootCmd = ""
                                         }
                                     }
@@ -619,7 +647,7 @@ fun UnlockToolFlashScreen(
                                         ) {
                                             if (customFastbootCmd.isEmpty()) {
                                                 Text(
-                                                    text = "Type custom command (e.g. oem edl)",
+                                                    text = "Type custom command (e.g. oem edl, getvar product)",
                                                     fontSize = 10.sp,
                                                     fontFamily = FontFamily.Monospace,
                                                     color = Color(0xFF64748B)
@@ -645,13 +673,23 @@ fun UnlockToolFlashScreen(
 
                         AppNavDestination.ADB -> {
                             // GROUP BOX 1: ADB SHELL COMMANDS (ADB Tab Only)
-                            GroupBox(title = "1. ADB Operations & Control", icon = Icons.Default.Usb) {
+                            GroupBox(title = "1. ADB Operations & Bypass Functions", icon = Icons.Default.Usb) {
                                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        FastbootOptionCard("List Devices", "devices", isSelected = selectedAdbAction == "devices" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "devices"
+                                        FastbootOptionCard("Device Info", "getprop ro.product.model && getprop ro.product.brand && getprop ro.build.version.release && getprop ro.board.platform", isSelected = selectedAdbAction.startsWith("getprop ro.product.model") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "getprop ro.product.model && getprop ro.product.brand && getprop ro.build.version.release && getprop ro.board.platform"
                                             customAdbCmd = ""
                                         }
+                                        FastbootOptionCard("Bypass FRP (Setup)", "settings put global setup_wizard_has_run 1 && settings put secure user_setup_complete 1 && settings put global device_provisioned 1 && am start -c android.intent.category.HOME -a android.intent.action.MAIN", isSelected = selectedAdbAction.contains("setup_wizard_has_run") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "settings put global setup_wizard_has_run 1 && settings put secure user_setup_complete 1 && settings put global device_provisioned 1 && am start -c android.intent.category.HOME -a android.intent.action.MAIN"
+                                            customAdbCmd = ""
+                                        }
+                                        FastbootOptionCard("MoreLocale Perm", "pm grant jp.co.c_lis.ccl.morelocale android.permission.CHANGE_CONFIGURATION", isSelected = selectedAdbAction.contains("morelocale") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "pm grant jp.co.c_lis.ccl.morelocale android.permission.CHANGE_CONFIGURATION"
+                                            customAdbCmd = ""
+                                        }
+                                    }
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         FastbootOptionCard("Reboot Bootloader", "reboot bootloader", isSelected = selectedAdbAction == "reboot bootloader" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedAdbAction = "reboot bootloader"
                                             customAdbCmd = ""
@@ -660,18 +698,36 @@ fun UnlockToolFlashScreen(
                                             selectedAdbAction = "reboot recovery"
                                             customAdbCmd = ""
                                         }
-                                    }
-                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        FastbootOptionCard("Reboot EDL", "reboot edl", isSelected = selectedAdbAction == "reboot edl" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                        FastbootOptionCard("Reboot EDL (9008)", "reboot edl", isSelected = selectedAdbAction == "reboot edl" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
                                             selectedAdbAction = "reboot edl"
                                             customAdbCmd = ""
                                         }
-                                        FastbootOptionCard("Getprop Hardware", "getprop ro.hardware", isSelected = selectedAdbAction == "getprop ro.hardware" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "getprop ro.hardware"
+                                    }
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Disable Mi Cloud", "pm disable-user --user 0 com.miui.cloudservice", isSelected = selectedAdbAction.contains("com.miui.cloudservice") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "pm disable-user --user 0 com.miui.cloudservice && pm disable-user --user 0 com.xiaomi.finddevice"
                                             customAdbCmd = ""
                                         }
-                                        FastbootOptionCard("Kill Server", "kill-server", isSelected = selectedAdbAction == "kill-server" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
-                                            selectedAdbAction = "kill-server"
+                                        FastbootOptionCard("Battery Health", "dumpsys battery", isSelected = selectedAdbAction == "dumpsys battery" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "dumpsys battery"
+                                            customAdbCmd = ""
+                                        }
+                                        FastbootOptionCard("Screen Size & DPI", "wm size && wm density", isSelected = selectedAdbAction == "wm size && wm density" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "wm size && wm density"
+                                            customAdbCmd = ""
+                                        }
+                                    }
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        FastbootOptionCard("Remove Demo Mode", "am broadcast -a com.google.android.setupwizard.DEMO_MODE_EXIT", isSelected = selectedAdbAction.contains("DEMO_MODE_EXIT") && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "am broadcast -a com.google.android.setupwizard.DEMO_MODE_EXIT"
+                                            customAdbCmd = ""
+                                        }
+                                        FastbootOptionCard("Dump Partitions", "cat /proc/partitions", isSelected = selectedAdbAction == "cat /proc/partitions" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "cat /proc/partitions"
+                                            customAdbCmd = ""
+                                        }
+                                        FastbootOptionCard("Reboot System", "reboot", isSelected = selectedAdbAction == "reboot" && customAdbCmd.isEmpty(), modifier = Modifier.weight(1f)) {
+                                            selectedAdbAction = "reboot"
                                             customAdbCmd = ""
                                         }
                                     }
@@ -679,7 +735,7 @@ fun UnlockToolFlashScreen(
                             }
 
                             // GROUP BOX 2: CUSTOM ADB COMMAND
-                            GroupBox(title = "2. Custom ADB Command", icon = Icons.Default.Usb) {
+                            GroupBox(title = "2. Custom ADB Shell Terminal", icon = Icons.Default.Usb) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -699,7 +755,7 @@ fun UnlockToolFlashScreen(
                                         ) {
                                             if (customAdbCmd.isEmpty()) {
                                                 Text(
-                                                    text = "Type custom ADB command (e.g. getprop)",
+                                                    text = "Type custom ADB shell command (e.g. getprop, pm list packages)",
                                                     fontSize = 10.sp,
                                                     fontFamily = FontFamily.Monospace,
                                                     color = Color(0xFF64748B)
@@ -1631,7 +1687,15 @@ private fun ToolTopBar(
                 Surface(
                     shape = RoundedCornerShape(3.dp),
                     color = when (targetPhoneState) {
-                        is TargetPhoneState.Connected -> Color(0xFF166534)
+                        is TargetPhoneState.Connected -> when (targetPhoneState.mode) {
+                            com.example.protocol.UsbDeviceMode.BROM -> Color(0xFF166534)
+                            com.example.protocol.UsbDeviceMode.FASTBOOT -> Color(0xFF0369A1)
+                            com.example.protocol.UsbDeviceMode.ADB -> Color(0xFF0284C7)
+                            com.example.protocol.UsbDeviceMode.EDL_9008 -> Color(0xFF991B1B)
+                            com.example.protocol.UsbDeviceMode.META -> Color(0xFF6D28D9)
+                            com.example.protocol.UsbDeviceMode.SPD_DIAG -> Color(0xFFB45309)
+                            else -> Color(0xFF166534)
+                        }
                         is TargetPhoneState.RequestingPermission -> Color(0xFF854D0E)
                         is TargetPhoneState.Error -> Color(0xFF991B1B)
                         else -> if (detectedPortsCount > 0) Color(0xFF0369A1) else Color(0xFF1E293B)
@@ -1653,7 +1717,7 @@ private fun ToolTopBar(
                         )
                         Text(
                             text = when (targetPhoneState) {
-                                is TargetPhoneState.Connected -> "BROM OK"
+                                is TargetPhoneState.Connected -> "${targetPhoneState.mode.label} OK"
                                 is TargetPhoneState.RequestingPermission -> "Perm Req"
                                 is TargetPhoneState.Error -> "USB Err"
                                 else -> if (detectedPortsCount > 0) "Ports ($detectedPortsCount)" else "Port Sniffer"
@@ -1837,7 +1901,11 @@ private fun PortSnifferDialog(
                                                 color = when (port.mode) {
                                                     com.example.protocol.UsbDeviceMode.BROM -> Color(0xFF15803D)
                                                     com.example.protocol.UsbDeviceMode.PRELOADER -> Color(0xFFB45309)
+                                                    com.example.protocol.UsbDeviceMode.META -> Color(0xFF7C3AED)
                                                     com.example.protocol.UsbDeviceMode.FASTBOOT -> Color(0xFF0369A1)
+                                                    com.example.protocol.UsbDeviceMode.ADB -> Color(0xFF0284C7)
+                                                    com.example.protocol.UsbDeviceMode.EDL_9008 -> Color(0xFFDC2626)
+                                                    com.example.protocol.UsbDeviceMode.SPD_DIAG -> Color(0xFFD97706)
                                                     else -> Color(0xFF475569)
                                                 }
                                             ) {

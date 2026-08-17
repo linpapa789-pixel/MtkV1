@@ -25,8 +25,11 @@ import kotlinx.coroutines.withContext
 enum class UsbDeviceMode(val label: String, val description: String) {
     BROM("MTK BROM", "MediaTek BootROM Mode (Flash & Service Ready)"),
     PRELOADER("Preloader", "MTK Preloader / DA VCOM Port"),
+    META("MTK META", "MediaTek META Calibration Mode"),
     FASTBOOT("Fastboot", "Android Fastboot Bootloader Mode"),
     ADB("ADB Debugging", "Android USB Debugging Interface"),
+    EDL_9008("Qualcomm EDL", "Qualcomm HS-USB QDLoader 9008 Emergency Port"),
+    SPD_DIAG("Unisoc / SPD", "Spreadtrum / Unisoc Diag & Download Mode"),
     MTP("MTP / File Transfer", "Media Transfer Protocol (Normal Android Boot)"),
     CDC_SERIAL("CDC Serial", "Serial / UART Bridge Device"),
     UNKNOWN("USB Device", "Connected USB Peripheral"),
@@ -217,8 +220,16 @@ class TargetPhoneUsbManager(
                 try {
                     val ports = scanAllAttachedPorts()
                     if (!isConnected() && ports.isNotEmpty()) {
-                        val candidate = ports.firstOrNull { it.vendorId == MTK_VID || it.mode == UsbDeviceMode.BROM || it.mode == UsbDeviceMode.PRELOADER || it.mode == UsbDeviceMode.FASTBOOT || it.mode == UsbDeviceMode.ADB }
-                            ?: ports.firstOrNull()
+                        val candidate = ports.firstOrNull { 
+                            it.vendorId == MTK_VID || 
+                            it.mode == UsbDeviceMode.BROM || 
+                            it.mode == UsbDeviceMode.PRELOADER || 
+                            it.mode == UsbDeviceMode.META ||
+                            it.mode == UsbDeviceMode.FASTBOOT || 
+                            it.mode == UsbDeviceMode.ADB ||
+                            it.mode == UsbDeviceMode.EDL_9008 ||
+                            it.mode == UsbDeviceMode.SPD_DIAG
+                        } ?: ports.firstOrNull()
                         if (candidate != null) {
                             val rawDevice = usbManager.deviceList.values.firstOrNull { it.vendorId == candidate.vendorId && it.productId == candidate.productId }
                             if (rawDevice != null) {
@@ -245,17 +256,32 @@ class TargetPhoneUsbManager(
         val vid = device.vendorId
         val pid = device.productId
 
-        // 1. Check MTK BROM
+        // 1. Qualcomm Emergency Download Mode (EDL 9008 / 900E / 9071)
+        if ((vid == 0x05C6 && (pid == 0x9008 || pid == 0x900E || pid == 0x9025 || pid == 0x9011)) ||
+            (vid == 0x1199 && pid == 0x9071) || (vid == 0x2A70 && pid == 0x9008)) {
+            return UsbDeviceMode.EDL_9008
+        }
+
+        // 2. Spreadtrum / Unisoc Diag & Download Mode
+        if ((vid == 0x1EBB && (pid == 0x0003 || pid == 0x0002 || pid == 0x0001)) ||
+            (vid == 0x1782 && (pid == 0x0301 || pid == 0x0002 || pid == 0x0003 || pid == 0x4D00))) {
+            return UsbDeviceMode.SPD_DIAG
+        }
+
+        // 3. MediaTek BROM / Preloader / META Mode
         if (vid == MTK_VID) {
             if (pid == 0x0003 || pid == 0x0001 || pid == 0x0002 || pid == 0x0005) {
                 return UsbDeviceMode.BROM
+            }
+            if (pid == 0x0008) {
+                return UsbDeviceMode.META
             }
             if (pid == 0x2000 || pid == 0x2001 || pid == 0x2004 || pid == 0x2005) {
                 return UsbDeviceMode.PRELOADER
             }
         }
 
-        // 2. Check Interfaces for Fastboot / ADB / MTP / CDC
+        // 4. Check Interfaces for Fastboot / ADB / MTP / CDC
         var hasFastboot = false
         var hasAdb = false
         var hasMtp = false
@@ -285,10 +311,12 @@ class TargetPhoneUsbManager(
             }
         }
 
-        if (hasFastboot || (vid == 0x18D1 && (pid == 0x4EE0 || pid == 0xD00D)) || (vid == 0x2717 && (pid == 0xFF40 || pid == 0xFF48))) {
+        if (hasFastboot || (vid == 0x18D1 && (pid == 0x4EE0 || pid == 0xD00D)) || 
+            (vid == 0x2717 && (pid == 0xFF40 || pid == 0xFF48)) || 
+            (vid == 0x0D95 && pid == 0x0291) || (vid == 0x0451 && pid == 0xD00F)) {
             return UsbDeviceMode.FASTBOOT
         }
-        if (hasAdb) {
+        if (hasAdb || (vid == 0x0D95 && pid == 0x0289) || (vid == 0x18D1 && pid == 0x4EE0) || (vid == 0x12D1 && pid == 0x15C1)) {
             return UsbDeviceMode.ADB
         }
         if (vid == MTK_VID) {

@@ -1,16 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- MediaTek Vendor ID 0x0E8D (3725 in decimal) -->
+    <!-- MediaTek Vendor ID 0x0E8D (3725) -->
     <!-- MTK USB Port (BROM Mode - 0x0003) -->
     <usb-device vendor-id="3725" product-id="3" />
-    <!-- MTK Preloader / DA USB VCOM Port (0x2000) -->
-    <usb-device vendor-id="3725" product-id="8192" />
-    <!-- MTK DA USB VCOM (0x2001) -->
-    <usb-device vendor-id="3725" product-id="8193" />
-    <!-- MTK USB Modem / CDC (0x2004) -->
-    <usb-device vendor-id="3725" product-id="8196" />
-    <!-- MTK BootROM Generic (0x0001) -->
+    <!-- MTK BootROM Generic (0x0001, 0x0002) -->
     <usb-device vendor-id="3725" product-id="1" />
-    <!-- All MediaTek Inc Devices (Vendor-level catch-all) -->
+    <usb-device vendor-id="3725" product-id="2" />
+    <!-- MTK Preloader / DA USB VCOM Port (0x2000, 0x2001, 0x2004) -->
+    <usb-device vendor-id="3725" product-id="8192" />
+    <usb-device vendor-id="3725" product-id="8193" />
+    <usb-device vendor-id="3725" product-id="8196" />
+    <!-- MTK META Mode (0x0008) -->
+    <usb-device vendor-id="3725" product-id="8" />
     <usb-device vendor-id="3725" />
+
+    <!-- Google / Standard Android ADB & Fastboot (0x18D1 = 6353) -->
+    <usb-device vendor-id="6353" product-id="20192" /> <!-- 0x4EE0 ADB -->
+    <usb-device vendor-id="6353" product-id="20193" /> <!-- 0x4EE1 ADB + Composite -->
+    <usb-device vendor-id="6353" product-id="53261" /> <!-- 0xD00D Fastboot -->
+    <usb-device vendor-id="6353" />
+
+    <!-- Xiaomi / Redmi (0x2717 = 10007) -->
+    <usb-device vendor-id="10007" product-id="65344" /> <!-- 0xFF40 Fastboot -->
+    <usb-device vendor-id="10007" product-id="65352" /> <!-- 0xFF48 Fastboot -->
+    <usb-device vendor-id="10007" product-id="3841" />  <!-- 0x0F01 ADB -->
+    <usb-device vendor-id="10007" product-id="65297" /> <!-- 0xFF11 ADB -->
+    <usb-device vendor-id="10007" />
+
+    <!-- Qualcomm Technologies Emergency Download EDL 9008 (0x05C6 = 1478) -->
+    <usb-device vendor-id="1478" product-id="36872" /> <!-- 0x9008 EDL -->
+    <usb-device vendor-id="1478" product-id="36878" /> <!-- 0x900E EDL -->
+    <usb-device vendor-id="1478" />
+
+    <!-- Spreadtrum / Unisoc Diag & Download (0x1EBB = 7867, 0x1782 = 6018) -->
+    <usb-device vendor-id="7867" product-id="3" /> <!-- 0x0003 SPD Download -->
+    <usb-device vendor-id="7867" product-id="2" /> <!-- 0x0002 SPD Diag -->
+    <usb-device vendor-id="6018" product-id="769" /> <!-- 0x0301 SPD -->
+    <usb-device vendor-id="7867" />
+    <usb-device vendor-id="6018" />
+
+    <!-- USB Serial Chips (CH340=0x1A86, CP210x=0x10C4, FTDI=0x0403) -->
+    <usb-device vendor-id="6790" /> <!-- CH340 -->
+    <usb-device vendor-id="4292" /> <!-- CP210x -->
+    <usb-device vendor-id="1027" /> <!-- FTDI -->
 </resources>
